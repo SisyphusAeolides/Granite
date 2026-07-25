@@ -8,6 +8,9 @@ rust-version.workspace = true
 [dependencies]
 uefi = { version = "0.39", features = ["alloc", "global_allocator", "logger", "panic_handler"] }
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "granite"
 path = "src/main.rs"

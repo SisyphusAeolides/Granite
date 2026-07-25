@@ -4,6 +4,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use granite::elf::{ElfError, ExecutableLayout};
 use uefi::CString16;
 use uefi::boot;
 use uefi::prelude::*;
@@ -30,9 +31,15 @@ fn main() -> Status {
         Ok(bundle) => {
             uefi::println!(
                 "Granite: bounded Boulder/Push/Crest preflight passed ({}/{}/{} bytes)",
-                bundle.boulder.len(),
-                bundle.push.len(),
-                bundle.crest.len(),
+                bundle.boulder.bytes.len(),
+                bundle.push.bytes.len(),
+                bundle.crest.bytes.len(),
+            );
+            uefi::println!(
+                "Granite: admitted ELF load segments Boulder={} Push={} Crest={}",
+                bundle.boulder.layout.segments().len(),
+                bundle.push.layout.segments().len(),
+                bundle.crest.layout.segments().len(),
             );
             uefi::println!("Granite: measured admission and transfer remain sealed");
             hold_loader_authority()
@@ -50,9 +57,17 @@ fn main() -> Status {
 }
 
 struct BootBundle {
-    boulder: Vec<u8>,
-    push: Vec<u8>,
-    crest: Vec<u8>,
+    boulder: BootArtifact,
+    push: BootArtifact,
+    crest: BootArtifact,
+}
+
+struct BootArtifact {
+    bytes: Vec<u8>,
+    /// This is the exact bounded load plan Granite will use for its native
+    /// placement stage. Keeping it with the admitted bytes prevents a second,
+    /// less-checked parse after measured admission.
+    layout: ExecutableLayout,
 }
 
 enum PreflightError {
@@ -67,7 +82,7 @@ enum ArtifactError {
     Read,
     Empty,
     Oversized(usize),
-    NotElf,
+    Elf(ElfError),
 }
 
 impl PreflightError {
@@ -88,7 +103,7 @@ impl ArtifactError {
             Self::Read => "read failed",
             Self::Empty => "is empty",
             Self::Oversized(_) => "exceeds the fixed bound",
-            Self::NotElf => "is not an ELF image",
+            Self::Elf(error) => error.reason(),
         }
     }
 
@@ -117,7 +132,7 @@ fn preflight_bundle() -> Result<BootBundle, PreflightError> {
     })
 }
 
-fn read_executable(volume: &mut Directory, path: &str) -> Result<Vec<u8>, ArtifactError> {
+fn read_executable(volume: &mut Directory, path: &str) -> Result<BootArtifact, ArtifactError> {
     let path = CString16::try_from(path).map_err(|_| ArtifactError::InvalidPath)?;
     let mut file = volume
         .open(path.as_ref(), FileMode::Read, FileAttribute::empty())
@@ -150,10 +165,8 @@ fn read_executable(volume: &mut Directory, path: &str) -> Result<Vec<u8>, Artifa
             return Err(ArtifactError::Read);
         }
     }
-    if bytes.get(..4) != Some(b"\x7fELF") {
-        return Err(ArtifactError::NotElf);
-    }
-    Ok(bytes)
+    let layout = ExecutableLayout::parse(&bytes).map_err(ArtifactError::Elf)?;
+    Ok(BootArtifact { bytes, layout })
 }
 
 /// A loader cannot return after it has accepted or rejected a boot attempt:
