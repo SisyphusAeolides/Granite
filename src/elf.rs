@@ -92,6 +92,17 @@ impl ExecutableLayout {
         &self.segments[..self.segment_count]
     }
 
+    /// Checks whether a physical address is part of an executable segment.
+    /// Granite uses this to select Boulder's dedicated 64-bit firmware entry
+    /// without trusting a second, independently parsed ELF table.
+    pub fn contains_executable_physical_address(&self, address: u64) -> bool {
+        self.segments().iter().any(|segment| {
+            segment.executable()
+                && address >= segment.physical_address
+                && segment.physical_end().is_some_and(|end| address < end)
+        })
+    }
+
     /// Parses the image without trusting any offset, size, alignment, or
     /// address supplied by the image itself.
     pub fn parse(bytes: &[u8]) -> Result<Self, ElfError> {

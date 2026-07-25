@@ -5,15 +5,27 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use granite::elf::{ElfError, ExecutableLayout};
+use granite::handoff::{
+    self, BootModule, EARLY_MAPPED_PHYSICAL_LIMIT, FirmwareMemoryRegion, Framebuffer,
+    GRANITE_BOOTSTRAP_ENTRY_PHYSICAL, HandoffError, MAXIMUM_MEMORY_REGIONS, MemoryKind, PAGE_BYTES,
+};
 use granite::measurement::{MeasurementError, boot_root, verify};
 use uefi::CString16;
 use uefi::boot;
+use uefi::boot::{OpenProtocolAttributes, OpenProtocolParams};
+use uefi::mem::memory_map::MemoryType;
 use uefi::prelude::*;
+use uefi::proto::console::gop::{GraphicsOutput, PixelFormat as GopPixelFormat};
 use uefi::proto::media::file::{Directory, File, FileAttribute, FileInfo, FileMode};
 use uefi::proto::media::fs::SimpleFileSystem;
+use uefi::system;
+use uefi::table::cfg::ConfigTableEntry;
 
 const MAXIMUM_ARTIFACT_BYTES: usize = 32 * 1024 * 1024;
 const READ_CHUNK_BYTES: usize = 1024 * 1024;
+const BOOT_INFORMATION_BYTES: usize = 64 * 1024;
+const BOOTSTRAP_STACK_BYTES: usize = 8 * 1024 * 1024;
+const MAXIMUM_ACPI_ROOT_BYTES: usize = 4096;
 const BOULDER_PATH: &str = "\\BOOT\\BOULDER";
 const PUSH_PATH: &str = "\\BOOT\\PUSH";
 const CREST_PATH: &str = "\\BOOT\\CREST";
@@ -24,10 +36,9 @@ const CREST_EXPECTED_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_GRANITE_CRES
 
 /// Granite is Sisyphus OS's native UEFI boot authority.
 ///
-/// This first executable milestone establishes a direct firmware entry point
-/// without GRUB or Limine and performs bounded preflight of the three boot
-/// artifacts. Subsequent stages add measured admission, boot-record
-/// construction, exit from boot services, and the final control transfer.
+/// Granite opens the firmware boot volume directly, measures the assembled
+/// Boulder/Push/Crest bundle, constructs Boulder's bounded handoff record,
+/// exits boot services, and transfers to Boulder's native 64-bit entry.
 #[entry]
 fn main() -> Status {
     uefi::helpers::init().expect("Granite requires a usable UEFI console");
@@ -53,8 +64,14 @@ fn main() -> Status {
                 bundle.measurement_root[2],
                 bundle.measurement_root[3],
             );
-            uefi::println!("Granite: measured admission and transfer remain sealed");
-            hold_loader_authority()
+            uefi::println!("Granite: placing measured native handoff");
+            match transfer_to_boulder(bundle) {
+                Ok(()) => unreachable!("Boulder handoff must not return"),
+                Err(error) => {
+                    uefi::println!("Granite: native handoff rejected: {error:?}");
+                    hold_loader_authority()
+                }
+            }
         }
         Err(error) => {
             let (artifact, reason, size) = error.describe();
@@ -82,6 +99,44 @@ struct BootArtifact {
     /// less-checked parse after measured admission.
     layout: ExecutableLayout,
     digest: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeHandoffError {
+    Layout(HandoffError),
+    PageCount,
+    BoulderPlacement(usize),
+    ModulePlacement,
+    BootInformationPlacement,
+    AcpiRoot,
+    GraphicsOutput,
+    GraphicsFormat,
+    BootstrapStackPlacement,
+    DeferredBssPlacement,
+}
+
+impl From<HandoffError> for NativeHandoffError {
+    fn from(error: HandoffError) -> Self {
+        Self::Layout(error)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PlacedModule {
+    physical_address: u64,
+    bytes: u64,
+}
+
+#[derive(Clone, Copy)]
+struct AcpiRoot {
+    bytes: [u8; MAXIMUM_ACPI_ROOT_BYTES],
+    length: usize,
+}
+
+impl AcpiRoot {
+    fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.length]
+    }
 }
 
 enum PreflightError {
@@ -202,6 +257,382 @@ fn read_executable(
         layout,
         digest,
     })
+}
+
+fn transfer_to_boulder(bundle: BootBundle) -> Result<(), NativeHandoffError> {
+    handoff::validate_boulder_layout(&bundle.boulder.layout)?;
+    let deferred_bss = deferred_bss_range(&bundle.boulder.layout)?;
+    place_boulder(&bundle.boulder)?;
+    let push = place_module(&bundle.push.bytes, deferred_bss)?;
+    let crest = place_module(&bundle.crest.bytes, deferred_bss)?;
+    let framebuffer = capture_framebuffer()?;
+    let acpi_root = capture_acpi_root()?;
+    let bootstrap_stack = boot::allocate_pages(
+        boot::AllocateType::MaxAddress(EARLY_MAPPED_PHYSICAL_LIMIT - 1),
+        MemoryType::LOADER_DATA,
+        page_count(BOOTSTRAP_STACK_BYTES as u64)?,
+    )
+    .map_err(|_| NativeHandoffError::BootstrapStackPlacement)?;
+    let bootstrap_stack_start = bootstrap_stack.as_ptr() as u64;
+    let bootstrap_stack_end = bootstrap_stack_start
+        .checked_add(BOOTSTRAP_STACK_BYTES as u64)
+        .ok_or(NativeHandoffError::BootstrapStackPlacement)?;
+    if bootstrap_stack_end > EARLY_MAPPED_PHYSICAL_LIMIT
+        || overlaps_deferred_bss(bootstrap_stack_start, bootstrap_stack_end, deferred_bss)
+    {
+        return Err(NativeHandoffError::BootstrapStackPlacement);
+    }
+    let boot_information = boot::allocate_pages(
+        boot::AllocateType::MaxAddress(EARLY_MAPPED_PHYSICAL_LIMIT - 1),
+        MemoryType::LOADER_DATA,
+        page_count(BOOT_INFORMATION_BYTES as u64)?,
+    )
+    .map_err(|_| NativeHandoffError::BootInformationPlacement)?;
+    let boot_information_address = boot_information.as_ptr() as u64;
+    let boot_information_end = boot_information_address
+        .checked_add(BOOT_INFORMATION_BYTES as u64)
+        .ok_or(NativeHandoffError::BootInformationPlacement)?;
+    if boot_information_end > EARLY_MAPPED_PHYSICAL_LIMIT
+        || overlaps_deferred_bss(boot_information_address, boot_information_end, deferred_bss)
+    {
+        return Err(NativeHandoffError::BootInformationPlacement);
+    }
+
+    // All FAT-backed artifact vectors are now copied into their retained
+    // physical locations, so release their firmware allocations before the
+    // final memory map is acquired.
+    drop(bundle);
+
+    uefi::println!(
+        "Granite: Boulder placed; Push={:#x} Crest={:#x}; leaving UEFI boot services",
+        push.physical_address,
+        crest.physical_address,
+    );
+
+    // After this call neither the firmware allocator nor protocol references
+    // may be used. Any invariant failure below halts before an untrusted or
+    // incomplete handoff can reach Boulder.
+    let memory_map = unsafe { boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) };
+    let mut regions = [FirmwareMemoryRegion::EMPTY; MAXIMUM_MEMORY_REGIONS];
+    let region_count = match collect_memory_regions(&memory_map, &mut regions) {
+        Ok(count) => count,
+        Err(_) => halt_after_boot_services(),
+    };
+    let modules = [
+        BootModule {
+            start: push.physical_address,
+            bytes: push.bytes,
+            name: b"push",
+        },
+        BootModule {
+            start: crest.physical_address,
+            bytes: crest.bytes,
+            name: b"crest",
+        },
+    ];
+    let boot_information = unsafe {
+        core::slice::from_raw_parts_mut(boot_information.as_ptr(), BOOT_INFORMATION_BYTES)
+    };
+    match handoff::write_multiboot2(
+        boot_information,
+        &regions[..region_count],
+        &modules,
+        framebuffer,
+        acpi_root.as_slice(),
+    ) {
+        Ok(_) => {}
+        Err(_) => halt_after_boot_services(),
+    }
+
+    // The dedicated Boulder entry uses the System V register convention so
+    // the physical handoff address arrives in RDI. It installs a fresh
+    // higher-half map before it reaches any Rust code.
+    let entry: unsafe extern "sysv64" fn(usize, usize) -> ! =
+        unsafe { core::mem::transmute(GRANITE_BOOTSTRAP_ENTRY_PHYSICAL as usize) };
+    unsafe {
+        entry(
+            boot_information_address as usize,
+            bootstrap_stack_end as usize,
+        )
+    }
+}
+
+fn place_boulder(artifact: &BootArtifact) -> Result<(), NativeHandoffError> {
+    for (index, segment) in artifact.layout.segments().iter().enumerate() {
+        let physical_address = segment.physical_address();
+        let end = segment
+            .physical_end()
+            .ok_or(NativeHandoffError::BoulderPlacement(index))?;
+        if physical_address < 0x10_0000 || end > EARLY_MAPPED_PHYSICAL_LIMIT {
+            return Err(NativeHandoffError::BoulderPlacement(index));
+        }
+        if segment.file_bytes() == 0 && segment.virtual_address() >= 0xffff_8000_0000_0000 {
+            continue;
+        }
+        let target = boot::allocate_pages(
+            boot::AllocateType::Address(physical_address),
+            MemoryType::LOADER_DATA,
+            page_count(segment.memory_bytes())?,
+        )
+        .map_err(|_| NativeHandoffError::BoulderPlacement(index))?;
+        if target.as_ptr() as u64 != physical_address {
+            return Err(NativeHandoffError::BoulderPlacement(index));
+        }
+        let file_offset = usize::try_from(segment.file_offset())
+            .map_err(|_| NativeHandoffError::BoulderPlacement(index))?;
+        let file_bytes = usize::try_from(segment.file_bytes())
+            .map_err(|_| NativeHandoffError::BoulderPlacement(index))?;
+        let source_end = file_offset
+            .checked_add(file_bytes)
+            .ok_or(NativeHandoffError::BoulderPlacement(index))?;
+        let source = artifact
+            .bytes
+            .get(file_offset..source_end)
+            .ok_or(NativeHandoffError::BoulderPlacement(index))?;
+        let zero_bytes = page_count(segment.memory_bytes())?
+            .checked_mul(PAGE_BYTES as usize)
+            .ok_or(NativeHandoffError::PageCount)?;
+        unsafe {
+            // SAFETY: Granite allocated exactly this page-rounded target range
+            // and the checked source range comes from the admitted artifact.
+            core::ptr::write_bytes(target.as_ptr(), 0, zero_bytes);
+            core::ptr::copy_nonoverlapping(source.as_ptr(), target.as_ptr(), source.len());
+        }
+    }
+    Ok(())
+}
+
+fn place_module(
+    bytes: &[u8],
+    deferred_bss: Option<(u64, u64)>,
+) -> Result<PlacedModule, NativeHandoffError> {
+    let byte_count = u64::try_from(bytes.len()).map_err(|_| NativeHandoffError::ModulePlacement)?;
+    let target = boot::allocate_pages(
+        boot::AllocateType::MaxAddress(EARLY_MAPPED_PHYSICAL_LIMIT - 1),
+        MemoryType::LOADER_DATA,
+        page_count(byte_count)?,
+    )
+    .map_err(|_| NativeHandoffError::ModulePlacement)?;
+    let physical_address = target.as_ptr() as u64;
+    let end = physical_address
+        .checked_add(byte_count)
+        .ok_or(NativeHandoffError::ModulePlacement)?;
+    if end > EARLY_MAPPED_PHYSICAL_LIMIT
+        || overlaps_deferred_bss(physical_address, end, deferred_bss)
+    {
+        return Err(NativeHandoffError::ModulePlacement);
+    }
+    unsafe {
+        // SAFETY: the returned page range is at least `bytes.len()` bytes and
+        // source and destination cannot overlap.
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), target.as_ptr(), bytes.len());
+    }
+    Ok(PlacedModule {
+        physical_address,
+        bytes: byte_count,
+    })
+}
+
+fn deferred_bss_range(layout: &ExecutableLayout) -> Result<Option<(u64, u64)>, NativeHandoffError> {
+    let mut deferred = None;
+    for segment in layout.segments() {
+        if segment.file_bytes() != 0 || segment.virtual_address() < 0xffff_8000_0000_0000 {
+            continue;
+        }
+        let end = segment
+            .physical_end()
+            .ok_or(NativeHandoffError::DeferredBssPlacement)?;
+        if deferred
+            .replace((segment.physical_address(), end))
+            .is_some()
+        {
+            return Err(NativeHandoffError::DeferredBssPlacement);
+        }
+    }
+    Ok(deferred)
+}
+
+fn overlaps_deferred_bss(start: u64, end: u64, deferred_bss: Option<(u64, u64)>) -> bool {
+    deferred_bss
+        .is_some_and(|(reserved_start, reserved_end)| start < reserved_end && reserved_start < end)
+}
+
+fn page_count(bytes: u64) -> Result<usize, NativeHandoffError> {
+    if bytes == 0 {
+        return Err(NativeHandoffError::PageCount);
+    }
+    let pages = bytes
+        .checked_add(PAGE_BYTES - 1)
+        .map(|value| value / PAGE_BYTES)
+        .ok_or(NativeHandoffError::PageCount)?;
+    usize::try_from(pages).map_err(|_| NativeHandoffError::PageCount)
+}
+
+fn capture_framebuffer() -> Result<Option<Framebuffer>, NativeHandoffError> {
+    let handles =
+        boot::find_handles::<GraphicsOutput>().map_err(|_| NativeHandoffError::GraphicsOutput)?;
+    let Some(handle) = handles.first().copied() else {
+        return Ok(None);
+    };
+    let mut graphics = unsafe {
+        boot::open_protocol::<GraphicsOutput>(
+            OpenProtocolParams {
+                handle,
+                agent: boot::image_handle(),
+                controller: None,
+            },
+            OpenProtocolAttributes::GetProtocol,
+        )
+    }
+    .map_err(|_| NativeHandoffError::GraphicsOutput)?;
+    let mode = graphics.current_mode_info();
+    let (width, height) = mode.resolution();
+    let (red_position, green_position, blue_position) = match mode.pixel_format() {
+        GopPixelFormat::Rgb => (0, 8, 16),
+        GopPixelFormat::Bgr => (16, 8, 0),
+        GopPixelFormat::Bitmask | GopPixelFormat::BltOnly => {
+            return Err(NativeHandoffError::GraphicsFormat);
+        }
+    };
+    let pitch = mode
+        .stride()
+        .checked_mul(4)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or(NativeHandoffError::GraphicsFormat)?;
+    let mut frame_buffer = graphics.frame_buffer();
+    let physical_address = frame_buffer.as_mut_ptr() as u64;
+    let byte_length =
+        u64::try_from(frame_buffer.size()).map_err(|_| NativeHandoffError::GraphicsFormat)?;
+    let width = u32::try_from(width).map_err(|_| NativeHandoffError::GraphicsFormat)?;
+    let height = u32::try_from(height).map_err(|_| NativeHandoffError::GraphicsFormat)?;
+    Ok(Some(Framebuffer {
+        physical_address,
+        byte_length,
+        width,
+        height,
+        pitch,
+        red_position,
+        green_position,
+        blue_position,
+    }))
+}
+
+fn capture_acpi_root() -> Result<AcpiRoot, NativeHandoffError> {
+    let address = system::with_config_table(|tables| {
+        let mut acpi_v1 = None;
+        for entry in tables {
+            if entry.guid == ConfigTableEntry::ACPI2_GUID {
+                return Some(entry.address as usize);
+            }
+            if entry.guid == ConfigTableEntry::ACPI_GUID {
+                acpi_v1 = Some(entry.address as usize);
+            }
+        }
+        acpi_v1
+    })
+    .ok_or(NativeHandoffError::AcpiRoot)?;
+    if address == 0 || address as u64 >= EARLY_MAPPED_PHYSICAL_LIMIT {
+        return Err(NativeHandoffError::AcpiRoot);
+    }
+    let revision = unsafe {
+        // SAFETY: an ACPI configuration table entry supplies a firmware-owned
+        // RSDP pointer while boot services are active.
+        (address as *const u8).add(15).read_volatile()
+    };
+    let length = if revision >= 2 {
+        let encoded = unsafe {
+            // SAFETY: ACPI revision 2 RSDP records include the length field at
+            // byte 20; Granite bounds that value before copying it.
+            (address as *const u8)
+                .add(20)
+                .cast::<u32>()
+                .read_unaligned()
+        };
+        usize::try_from(u32::from_le(encoded)).map_err(|_| NativeHandoffError::AcpiRoot)?
+    } else {
+        20
+    };
+    if !(20..=MAXIMUM_ACPI_ROOT_BYTES).contains(&length)
+        || (address as u64)
+            .checked_add(length as u64)
+            .is_none_or(|end| end > EARLY_MAPPED_PHYSICAL_LIMIT)
+    {
+        return Err(NativeHandoffError::AcpiRoot);
+    }
+    let mut root = AcpiRoot {
+        bytes: [0; MAXIMUM_ACPI_ROOT_BYTES],
+        length,
+    };
+    unsafe {
+        // SAFETY: the validated firmware range is copied into Granite-owned
+        // stack storage before firmware services are exited.
+        core::ptr::copy_nonoverlapping(address as *const u8, root.bytes.as_mut_ptr(), root.length);
+    }
+    if root.bytes[..8] != *b"RSD PTR " {
+        return Err(NativeHandoffError::AcpiRoot);
+    }
+    Ok(root)
+}
+
+fn collect_memory_regions(
+    memory_map: &impl uefi::mem::memory_map::MemoryMap,
+    target: &mut [FirmwareMemoryRegion; MAXIMUM_MEMORY_REGIONS],
+) -> Result<usize, HandoffError> {
+    let mut count: usize = 0;
+    for descriptor in memory_map.entries() {
+        let length = descriptor
+            .page_count
+            .checked_mul(PAGE_BYTES)
+            .ok_or(HandoffError::InvalidMemoryRegion)?;
+        if length == 0 {
+            continue;
+        }
+        let region = FirmwareMemoryRegion {
+            start: descriptor.phys_start,
+            length,
+            kind: match descriptor.ty {
+                MemoryType::CONVENTIONAL
+                | MemoryType::BOOT_SERVICES_CODE
+                | MemoryType::BOOT_SERVICES_DATA => MemoryKind::Usable,
+                MemoryType::ACPI_RECLAIM => MemoryKind::AcpiReclaimable,
+                MemoryType::ACPI_NON_VOLATILE => MemoryKind::AcpiNonVolatile,
+                MemoryType::UNUSABLE => MemoryKind::Defective,
+                _ => MemoryKind::Reserved,
+            },
+        };
+        if region.end().is_none() {
+            return Err(HandoffError::InvalidMemoryRegion);
+        }
+        if let Some(previous) = count.checked_sub(1).and_then(|index| target.get_mut(index))
+            && previous.kind == region.kind
+            && previous.end() == Some(region.start)
+        {
+            previous.length = previous
+                .length
+                .checked_add(region.length)
+                .ok_or(HandoffError::InvalidMemoryRegion)?;
+            continue;
+        }
+        let slot = target
+            .get_mut(count)
+            .ok_or(HandoffError::TooManyMemoryRegions)?;
+        *slot = region;
+        count += 1;
+    }
+    if count == 0 {
+        return Err(HandoffError::InvalidMemoryRegion);
+    }
+    Ok(count)
+}
+
+fn halt_after_boot_services() -> ! {
+    loop {
+        unsafe {
+            // SAFETY: UEFI boot services have ended and this is the terminal
+            // failure path before any kernel control transfer.
+            core::arch::asm!("cli", "hlt", options(nomem, nostack));
+        }
+    }
 }
 
 const fn parse_sha256(encoded: &str) -> [u8; 32] {

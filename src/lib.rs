@@ -6,4 +6,5 @@
 //! later placement stage will consume.
 
 pub mod elf;
+pub mod handoff;
 pub mod measurement;
