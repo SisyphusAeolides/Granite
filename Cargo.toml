@@ -1,0 +1,18 @@
+[package]
+name = "granite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+uefi = { version = "0.39", features = ["alloc", "global_allocator", "logger", "panic_handler"] }
+
+[[bin]]
+name = "granite"
+path = "src/main.rs"
+test = false
+bench = false
+
+[lints]
+workspace = true
