@@ -4,9 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+build = "build.rs"
 
 [dependencies]
+blacklab = { path = "../../core/blacklab" }
 uefi = { version = "0.39", features = ["alloc", "global_allocator", "logger", "panic_handler"] }
+
+[build-dependencies]
+blacklab = { path = "../../core/blacklab" }
 
 [lib]
 path = "src/lib.rs"
