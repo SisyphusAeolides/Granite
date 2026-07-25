@@ -8,7 +8,7 @@ build = "build.rs"
 
 [dependencies]
 blacklab = { path = "../../core/blacklab" }
-uefi = { version = "0.39", features = ["alloc", "global_allocator", "logger", "panic_handler"] }
+uefi = { version = "0.39", features = ["alloc", "global_allocator", "logger"] }
 
 [build-dependencies]
 blacklab = { path = "../../core/blacklab" }

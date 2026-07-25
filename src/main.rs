@@ -21,6 +21,15 @@ use uefi::proto::media::fs::SimpleFileSystem;
 use uefi::system;
 use uefi::table::cfg::ConfigTableEntry;
 
+#[cfg(target_os = "uefi")]
+#[panic_handler]
+fn granite_panic(info: &core::panic::PanicInfo<'_>) -> ! {
+    uefi::println!("Granite panic: {}", info);
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
 const MAXIMUM_ARTIFACT_BYTES: usize = 32 * 1024 * 1024;
 const READ_CHUNK_BYTES: usize = 1024 * 1024;
 const BOOT_INFORMATION_BYTES: usize = 64 * 1024;
