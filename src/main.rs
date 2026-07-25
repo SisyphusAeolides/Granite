@@ -29,10 +29,25 @@ const MAXIMUM_ACPI_ROOT_BYTES: usize = 4096;
 const BOULDER_PATH: &str = "\\BOOT\\BOULDER";
 const PUSH_PATH: &str = "\\BOOT\\PUSH";
 const CREST_PATH: &str = "\\BOOT\\CREST";
+const HERMES_GSP_RM_PATH: &str = "\\BOOT\\GSPRM.BIN";
+const HERMES_SEC2_BOOTLOADER_PATH: &str = "\\BOOT\\SEC2.BIN";
+const HERMES_GSP_BOOTLOADER_PATH: &str = "\\BOOT\\GSPBL.BIN";
+const HERMES_BOOTER_LOAD_PATH: &str = "\\BOOT\\BOOTL.BIN";
+const HERMES_BOOTER_UNLOAD_PATH: &str = "\\BOOT\\BOOTU.BIN";
 
 const BOULDER_EXPECTED_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_GRANITE_BOULDER_SHA256"));
 const PUSH_EXPECTED_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_GRANITE_PUSH_SHA256"));
 const CREST_EXPECTED_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_GRANITE_CREST_SHA256"));
+const HERMES_GSP_RM_EXPECTED_SHA256: [u8; 32] =
+    parse_sha256(env!("SISYPHUS_GRANITE_HERMES_GSP_RM_SHA256"));
+const HERMES_SEC2_BOOTLOADER_EXPECTED_SHA256: [u8; 32] =
+    parse_sha256(env!("SISYPHUS_GRANITE_HERMES_SEC2_BOOTLOADER_SHA256"));
+const HERMES_GSP_BOOTLOADER_EXPECTED_SHA256: [u8; 32] =
+    parse_sha256(env!("SISYPHUS_GRANITE_HERMES_GSP_BOOTLOADER_SHA256"));
+const HERMES_BOOTER_LOAD_EXPECTED_SHA256: [u8; 32] =
+    parse_sha256(env!("SISYPHUS_GRANITE_HERMES_BOOTER_LOAD_SHA256"));
+const HERMES_BOOTER_UNLOAD_EXPECTED_SHA256: [u8; 32] =
+    parse_sha256(env!("SISYPHUS_GRANITE_HERMES_BOOTER_UNLOAD_SHA256"));
 
 /// Granite is Sisyphus OS's native UEFI boot authority.
 ///
@@ -64,6 +79,24 @@ fn main() -> Status {
                 bundle.measurement_root[2],
                 bundle.measurement_root[3],
             );
+            if let Some(gsp) = bundle.hermes_gsp.as_ref() {
+                let gsp_root = gsp.measurement_root();
+                uefi::println!(
+                    "Granite: measured T1000 GSP bundle admitted root={:02x}{:02x}{:02x}{:02x}… (GSP-RM={} bytes, SEC2={} bytes, Booter={}/{} bytes)",
+                    gsp_root[0],
+                    gsp_root[1],
+                    gsp_root[2],
+                    gsp_root[3],
+                    gsp.gsp_rm.bytes.len(),
+                    gsp.sec2_bootloader.bytes.len(),
+                    gsp.booter_load.bytes.len(),
+                    gsp.booter_unload.bytes.len(),
+                );
+            } else {
+                uefi::println!(
+                    "Granite: no NVIDIA GSP bundle selected; native GSP stays unavailable"
+                );
+            }
             uefi::println!("Granite: placing measured native handoff");
             match transfer_to_boulder(bundle) {
                 Ok(()) => unreachable!("Boulder handoff must not return"),
@@ -89,6 +122,7 @@ struct BootBundle {
     boulder: BootArtifact,
     push: BootArtifact,
     crest: BootArtifact,
+    hermes_gsp: Option<T1000GspBootBundle>,
     measurement_root: [u8; 32],
 }
 
@@ -99,6 +133,45 @@ struct BootArtifact {
     /// less-checked parse after measured admission.
     layout: ExecutableLayout,
     digest: [u8; 32],
+}
+
+/// A non-executable artifact that Granite only transports after independent
+/// measurement.  Boulder performs the stricter NVIDIA role/hash validation;
+/// Granite never interprets firmware data as executable host code.
+struct RawArtifact {
+    bytes: Vec<u8>,
+    digest: [u8; 32],
+}
+
+struct T1000GspBootBundle {
+    gsp_rm: RawArtifact,
+    sec2_bootloader: RawArtifact,
+    gsp_bootloader: RawArtifact,
+    booter_load: RawArtifact,
+    booter_unload: RawArtifact,
+}
+
+impl T1000GspBootBundle {
+    /// Binds the ordered raw firmware measurements separately from the
+    /// executable boot root. Firmware never becomes a host executable, but a
+    /// reordered or substituted member must still change its evidence.
+    fn measurement_root(&self) -> [u8; 32] {
+        let mut material = [0_u8; 32 * 5];
+        for (index, digest) in [
+            self.gsp_rm.digest,
+            self.sec2_bootloader.digest,
+            self.gsp_bootloader.digest,
+            self.booter_load.digest,
+            self.booter_unload.digest,
+        ]
+        .iter()
+        .enumerate()
+        {
+            let start = index * 32;
+            material[start..start + 32].copy_from_slice(digest);
+        }
+        blacklab::oureboros::sha256(&material)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -127,6 +200,14 @@ struct PlacedModule {
     bytes: u64,
 }
 
+struct PlacedT1000GspBundle {
+    gsp_rm: PlacedModule,
+    sec2_bootloader: PlacedModule,
+    gsp_bootloader: PlacedModule,
+    booter_load: PlacedModule,
+    booter_unload: PlacedModule,
+}
+
 #[derive(Clone, Copy)]
 struct AcpiRoot {
     bytes: [u8; MAXIMUM_ACPI_ROOT_BYTES],
@@ -144,6 +225,11 @@ enum PreflightError {
     Boulder(ArtifactError),
     Push(ArtifactError),
     Crest(ArtifactError),
+    HermesGspRm(ArtifactError),
+    HermesSec2Bootloader(ArtifactError),
+    HermesGspBootloader(ArtifactError),
+    HermesBooterLoad(ArtifactError),
+    HermesBooterUnload(ArtifactError),
 }
 
 enum ArtifactError {
@@ -163,6 +249,17 @@ impl PreflightError {
             Self::Boulder(error) => ("Boulder", error.reason(), error.size()),
             Self::Push(error) => ("Push", error.reason(), error.size()),
             Self::Crest(error) => ("Crest", error.reason(), error.size()),
+            Self::HermesGspRm(error) => ("Hermes GSP-RM", error.reason(), error.size()),
+            Self::HermesSec2Bootloader(error) => {
+                ("Hermes SEC2 bootloader", error.reason(), error.size())
+            }
+            Self::HermesGspBootloader(error) => {
+                ("Hermes GSP bootloader", error.reason(), error.size())
+            }
+            Self::HermesBooterLoad(error) => ("Hermes Booter Load", error.reason(), error.size()),
+            Self::HermesBooterUnload(error) => {
+                ("Hermes Booter Unload", error.reason(), error.size())
+            }
         }
     }
 }
@@ -201,13 +298,54 @@ fn preflight_bundle() -> Result<BootBundle, PreflightError> {
         .map_err(PreflightError::Push)?;
     let crest = read_executable(&mut volume, CREST_PATH, CREST_EXPECTED_SHA256)
         .map_err(PreflightError::Crest)?;
+    let hermes_gsp = if hermes_gsp_selected() {
+        Some(T1000GspBootBundle {
+            gsp_rm: read_raw_artifact(
+                &mut volume,
+                HERMES_GSP_RM_PATH,
+                HERMES_GSP_RM_EXPECTED_SHA256,
+            )
+            .map_err(PreflightError::HermesGspRm)?,
+            sec2_bootloader: read_raw_artifact(
+                &mut volume,
+                HERMES_SEC2_BOOTLOADER_PATH,
+                HERMES_SEC2_BOOTLOADER_EXPECTED_SHA256,
+            )
+            .map_err(PreflightError::HermesSec2Bootloader)?,
+            gsp_bootloader: read_raw_artifact(
+                &mut volume,
+                HERMES_GSP_BOOTLOADER_PATH,
+                HERMES_GSP_BOOTLOADER_EXPECTED_SHA256,
+            )
+            .map_err(PreflightError::HermesGspBootloader)?,
+            booter_load: read_raw_artifact(
+                &mut volume,
+                HERMES_BOOTER_LOAD_PATH,
+                HERMES_BOOTER_LOAD_EXPECTED_SHA256,
+            )
+            .map_err(PreflightError::HermesBooterLoad)?,
+            booter_unload: read_raw_artifact(
+                &mut volume,
+                HERMES_BOOTER_UNLOAD_PATH,
+                HERMES_BOOTER_UNLOAD_EXPECTED_SHA256,
+            )
+            .map_err(PreflightError::HermesBooterUnload)?,
+        })
+    } else {
+        None
+    };
     let measurement_root = boot_root(boulder.digest, push.digest, crest.digest);
     Ok(BootBundle {
         boulder,
         push,
         crest,
+        hermes_gsp,
         measurement_root,
     })
+}
+
+fn hermes_gsp_selected() -> bool {
+    env!("SISYPHUS_GRANITE_HERMES_GSP_PRESENT") == "1"
 }
 
 fn read_executable(
@@ -259,12 +397,66 @@ fn read_executable(
     })
 }
 
+fn read_raw_artifact(
+    volume: &mut Directory,
+    path: &str,
+    expected_digest: [u8; 32],
+) -> Result<RawArtifact, ArtifactError> {
+    let path = CString16::try_from(path).map_err(|_| ArtifactError::InvalidPath)?;
+    let mut file = volume
+        .open(path.as_ref(), FileMode::Read, FileAttribute::empty())
+        .map_err(|_| ArtifactError::Read)?
+        .into_regular_file()
+        .ok_or(ArtifactError::Read)?;
+    let length = file
+        .get_boxed_info::<FileInfo>()
+        .map_err(|_| ArtifactError::Read)?
+        .file_size();
+    let length = usize::try_from(length).map_err(|_| ArtifactError::Oversized(usize::MAX))?;
+    if length == 0 {
+        return Err(ArtifactError::Empty);
+    }
+    if length > MAXIMUM_ARTIFACT_BYTES {
+        return Err(ArtifactError::Oversized(length));
+    }
+    let mut bytes = alloc::vec![0; length];
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let end = offset.saturating_add(READ_CHUNK_BYTES).min(bytes.len());
+        let read = file
+            .read(&mut bytes[offset..end])
+            .map_err(|_| ArtifactError::Read)?;
+        if read == 0 {
+            return Err(ArtifactError::Read);
+        }
+        offset = offset.checked_add(read).ok_or(ArtifactError::Read)?;
+        if offset > bytes.len() {
+            return Err(ArtifactError::Read);
+        }
+    }
+    let digest = verify(&bytes, expected_digest).map_err(|error| match error {
+        MeasurementError::ManifestMissing => ArtifactError::ManifestMissing,
+        MeasurementError::DigestMismatch => ArtifactError::DigestMismatch,
+    })?;
+    Ok(RawArtifact { bytes, digest })
+}
+
 fn transfer_to_boulder(bundle: BootBundle) -> Result<(), NativeHandoffError> {
     handoff::validate_boulder_layout(&bundle.boulder.layout)?;
     let deferred_bss = deferred_bss_range(&bundle.boulder.layout)?;
     place_boulder(&bundle.boulder)?;
     let push = place_module(&bundle.push.bytes, deferred_bss)?;
     let crest = place_module(&bundle.crest.bytes, deferred_bss)?;
+    let hermes_gsp = match bundle.hermes_gsp.as_ref() {
+        Some(gsp) => Some(PlacedT1000GspBundle {
+            gsp_rm: place_module(&gsp.gsp_rm.bytes, deferred_bss)?,
+            sec2_bootloader: place_module(&gsp.sec2_bootloader.bytes, deferred_bss)?,
+            gsp_bootloader: place_module(&gsp.gsp_bootloader.bytes, deferred_bss)?,
+            booter_load: place_module(&gsp.booter_load.bytes, deferred_bss)?,
+            booter_unload: place_module(&gsp.booter_unload.bytes, deferred_bss)?,
+        }),
+        None => None,
+    };
     let framebuffer = capture_framebuffer()?;
     let acpi_root = capture_acpi_root()?;
     let bootstrap_stack = boot::allocate_pages(
@@ -303,11 +495,19 @@ fn transfer_to_boulder(bundle: BootBundle) -> Result<(), NativeHandoffError> {
     // final memory map is acquired.
     drop(bundle);
 
-    uefi::println!(
-        "Granite: Boulder placed; Push={:#x} Crest={:#x}; leaving UEFI boot services",
-        push.physical_address,
-        crest.physical_address,
-    );
+    match hermes_gsp.as_ref() {
+        Some(gsp) => uefi::println!(
+            "Granite: Boulder placed; Push={:#x} Crest={:#x} GSP-RM={:#x}; leaving UEFI boot services",
+            push.physical_address,
+            crest.physical_address,
+            gsp.gsp_rm.physical_address,
+        ),
+        None => uefi::println!(
+            "Granite: Boulder placed; Push={:#x} Crest={:#x}; leaving UEFI boot services",
+            push.physical_address,
+            crest.physical_address,
+        ),
+    }
 
     // After this call neither the firmware allocator nor protocol references
     // may be used. Any invariant failure below halts before an untrusted or
@@ -318,28 +518,79 @@ fn transfer_to_boulder(bundle: BootBundle) -> Result<(), NativeHandoffError> {
         Ok(count) => count,
         Err(_) => halt_after_boot_services(),
     };
-    let modules = [
-        BootModule {
-            start: push.physical_address,
-            bytes: push.bytes,
-            name: b"push",
-        },
-        BootModule {
-            start: crest.physical_address,
-            bytes: crest.bytes,
-            name: b"crest",
-        },
-    ];
     let boot_information = unsafe {
         core::slice::from_raw_parts_mut(boot_information.as_ptr(), BOOT_INFORMATION_BYTES)
     };
-    match handoff::write_multiboot2(
-        boot_information,
-        &regions[..region_count],
-        &modules,
-        framebuffer,
-        acpi_root.as_slice(),
-    ) {
+    let handoff = match hermes_gsp {
+        Some(gsp) => {
+            let modules = [
+                BootModule {
+                    start: push.physical_address,
+                    bytes: push.bytes,
+                    name: b"push",
+                },
+                BootModule {
+                    start: crest.physical_address,
+                    bytes: crest.bytes,
+                    name: b"crest",
+                },
+                BootModule {
+                    start: gsp.gsp_rm.physical_address,
+                    bytes: gsp.gsp_rm.bytes,
+                    name: b"hermes-gsp",
+                },
+                BootModule {
+                    start: gsp.sec2_bootloader.physical_address,
+                    bytes: gsp.sec2_bootloader.bytes,
+                    name: b"hermes-sec2",
+                },
+                BootModule {
+                    start: gsp.gsp_bootloader.physical_address,
+                    bytes: gsp.gsp_bootloader.bytes,
+                    name: b"hermes-gsp-bootloader",
+                },
+                BootModule {
+                    start: gsp.booter_load.physical_address,
+                    bytes: gsp.booter_load.bytes,
+                    name: b"hermes-booter-load",
+                },
+                BootModule {
+                    start: gsp.booter_unload.physical_address,
+                    bytes: gsp.booter_unload.bytes,
+                    name: b"hermes-booter-unload",
+                },
+            ];
+            handoff::write_multiboot2(
+                boot_information,
+                &regions[..region_count],
+                &modules,
+                framebuffer,
+                acpi_root.as_slice(),
+            )
+        }
+        None => {
+            let modules = [
+                BootModule {
+                    start: push.physical_address,
+                    bytes: push.bytes,
+                    name: b"push",
+                },
+                BootModule {
+                    start: crest.physical_address,
+                    bytes: crest.bytes,
+                    name: b"crest",
+                },
+            ];
+            handoff::write_multiboot2(
+                boot_information,
+                &regions[..region_count],
+                &modules,
+                framebuffer,
+                acpi_root.as_slice(),
+            )
+        }
+    };
+    match handoff {
         Ok(_) => {}
         Err(_) => halt_after_boot_services(),
     }
