@@ -1,6 +1,6 @@
 //! Measured-admission primitives used before Granite commits to firmware exit.
 
-use blacklab::oureboros::sha256;
+use sha2::{Digest, Sha256};
 
 pub const SHA256_BYTES: usize = 32;
 
@@ -8,6 +8,12 @@ pub const SHA256_BYTES: usize = 32;
 pub enum MeasurementError {
     ManifestMissing,
     DigestMismatch,
+}
+
+/// Computes an artifact measurement. Admission still requires an independent,
+/// nonzero expected digest through [`verify`].
+pub fn sha256(bytes: &[u8]) -> [u8; SHA256_BYTES] {
+    Sha256::digest(bytes).into()
 }
 
 /// Computes an artifact digest and requires it to match the build-bound
@@ -27,15 +33,15 @@ pub fn verify(
     Ok(actual)
 }
 
-/// Binds the ordered Boulder, Push, and Crest measurements into one root for
+/// Binds the ordered Arach, Push, and Crest measurements into one root for
 /// the native handoff record. Order is part of the evidence.
 pub fn boot_root(
-    boulder: [u8; SHA256_BYTES],
+    arach: [u8; SHA256_BYTES],
     push: [u8; SHA256_BYTES],
     crest: [u8; SHA256_BYTES],
 ) -> [u8; SHA256_BYTES] {
     let mut material = [0_u8; SHA256_BYTES * 3];
-    material[..SHA256_BYTES].copy_from_slice(&boulder);
+    material[..SHA256_BYTES].copy_from_slice(&arach);
     material[SHA256_BYTES..SHA256_BYTES * 2].copy_from_slice(&push);
     material[SHA256_BYTES * 2..].copy_from_slice(&crest);
     sha256(&material)
@@ -78,12 +84,9 @@ mod tests {
 
     #[test]
     fn ordered_boot_root_cannot_alias_a_permuted_bundle() {
-        let boulder = sha256(b"boulder");
+        let arach = sha256(b"arach");
         let push = sha256(b"push");
         let crest = sha256(b"crest");
-        assert_ne!(
-            boot_root(boulder, push, crest),
-            boot_root(push, boulder, crest)
-        );
+        assert_ne!(boot_root(arach, push, crest), boot_root(push, arach, crest));
     }
 }

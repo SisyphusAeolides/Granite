@@ -13,7 +13,7 @@ const PF_EXECUTE: u32 = 1;
 const ET_EXEC: u16 = 2;
 const EM_X86_64: u16 = 0x3e;
 
-/// The loader accepts a deliberately small program-header surface. Boulder
+/// The loader accepts a deliberately small program-header surface. Arach
 /// currently has eight loadable segments; this leaves headroom without turning
 /// an untrusted table into an unbounded boot-time allocation.
 pub const MAXIMUM_LOAD_SEGMENTS: usize = 16;
@@ -93,7 +93,7 @@ impl ExecutableLayout {
     }
 
     /// Checks whether a physical address is part of an executable segment.
-    /// Granite uses this to select Boulder's dedicated 64-bit firmware entry
+    /// Granite uses this to select Arach's dedicated 64-bit firmware entry
     /// without trusting a second, independently parsed ELF table.
     pub fn contains_executable_physical_address(&self, address: u64) -> bool {
         self.segments().iter().any(|segment| {

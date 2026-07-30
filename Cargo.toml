@@ -1,17 +1,24 @@
 [package]
 name = "granite"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-rust-version.workspace = true
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.91"
+repository = "https://github.com/SisyphusAeolides/Granite"
+description = "Measured UEFI bootloader for Arach OS"
 build = "build.rs"
 
+[features]
+default = []
+uefi-bin = ["dep:uefi"]
+fortran-policy = []
+
 [dependencies]
-blacklab = { path = "../../core/blacklab" }
-uefi = { version = "0.39", features = ["alloc", "global_allocator", "logger"] }
+sha2 = { version = "0.10.9", default-features = false }
+uefi = { version = "0.39", features = ["alloc", "global_allocator", "logger"], optional = true }
 
 [build-dependencies]
-blacklab = { path = "../../core/blacklab" }
+sha2 = "0.10.9"
 
 [lib]
 path = "src/lib.rs"
@@ -19,8 +26,17 @@ path = "src/lib.rs"
 [[bin]]
 name = "granite"
 path = "src/main.rs"
+required-features = ["uefi-bin"]
 test = false
 bench = false
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1

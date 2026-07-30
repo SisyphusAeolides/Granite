@@ -9,7 +9,7 @@ use granite::handoff::{
     self, BootModule, EARLY_MAPPED_PHYSICAL_LIMIT, FirmwareMemoryRegion, Framebuffer,
     GRANITE_BOOTSTRAP_ENTRY_PHYSICAL, HandoffError, MAXIMUM_MEMORY_REGIONS, MemoryKind, PAGE_BYTES,
 };
-use granite::measurement::{MeasurementError, boot_root, verify};
+use granite::measurement::{MeasurementError, boot_root, sha256, verify};
 use uefi::CString16;
 use uefi::boot;
 use uefi::boot::{OpenProtocolAttributes, OpenProtocolParams};
@@ -35,7 +35,7 @@ const READ_CHUNK_BYTES: usize = 1024 * 1024;
 const BOOT_INFORMATION_BYTES: usize = 64 * 1024;
 const BOOTSTRAP_STACK_BYTES: usize = 8 * 1024 * 1024;
 const MAXIMUM_ACPI_ROOT_BYTES: usize = 4096;
-const BOULDER_PATH: &str = "\\BOOT\\BOULDER";
+const ARACH_PATH: &str = "\\BOOT\\ARACH";
 const PUSH_PATH: &str = "\\BOOT\\PUSH";
 const CREST_PATH: &str = "\\BOOT\\CREST";
 const HERMES_GSP_RM_PATH: &str = "\\BOOT\\GSPRM.BIN";
@@ -44,25 +44,25 @@ const HERMES_GSP_BOOTLOADER_PATH: &str = "\\BOOT\\GSPBL.BIN";
 const HERMES_BOOTER_LOAD_PATH: &str = "\\BOOT\\BOOTL.BIN";
 const HERMES_BOOTER_UNLOAD_PATH: &str = "\\BOOT\\BOOTU.BIN";
 
-const BOULDER_EXPECTED_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_GRANITE_BOULDER_SHA256"));
-const PUSH_EXPECTED_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_GRANITE_PUSH_SHA256"));
-const CREST_EXPECTED_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_GRANITE_CREST_SHA256"));
+const ARACH_EXPECTED_SHA256: [u8; 32] = parse_sha256(env!("ARACH_GRANITE_ARACH_SHA256"));
+const PUSH_EXPECTED_SHA256: [u8; 32] = parse_sha256(env!("ARACH_GRANITE_PUSH_SHA256"));
+const CREST_EXPECTED_SHA256: [u8; 32] = parse_sha256(env!("ARACH_GRANITE_CREST_SHA256"));
 const HERMES_GSP_RM_EXPECTED_SHA256: [u8; 32] =
-    parse_sha256(env!("SISYPHUS_GRANITE_HERMES_GSP_RM_SHA256"));
+    parse_sha256(env!("ARACH_GRANITE_HERMES_GSP_RM_SHA256"));
 const HERMES_SEC2_BOOTLOADER_EXPECTED_SHA256: [u8; 32] =
-    parse_sha256(env!("SISYPHUS_GRANITE_HERMES_SEC2_BOOTLOADER_SHA256"));
+    parse_sha256(env!("ARACH_GRANITE_HERMES_SEC2_BOOTLOADER_SHA256"));
 const HERMES_GSP_BOOTLOADER_EXPECTED_SHA256: [u8; 32] =
-    parse_sha256(env!("SISYPHUS_GRANITE_HERMES_GSP_BOOTLOADER_SHA256"));
+    parse_sha256(env!("ARACH_GRANITE_HERMES_GSP_BOOTLOADER_SHA256"));
 const HERMES_BOOTER_LOAD_EXPECTED_SHA256: [u8; 32] =
-    parse_sha256(env!("SISYPHUS_GRANITE_HERMES_BOOTER_LOAD_SHA256"));
+    parse_sha256(env!("ARACH_GRANITE_HERMES_BOOTER_LOAD_SHA256"));
 const HERMES_BOOTER_UNLOAD_EXPECTED_SHA256: [u8; 32] =
-    parse_sha256(env!("SISYPHUS_GRANITE_HERMES_BOOTER_UNLOAD_SHA256"));
+    parse_sha256(env!("ARACH_GRANITE_HERMES_BOOTER_UNLOAD_SHA256"));
 
-/// Granite is Sisyphus OS's native UEFI boot authority.
+/// Granite is Arach OS's native UEFI boot authority.
 ///
 /// Granite opens the firmware boot volume directly, measures the assembled
-/// Boulder/Push/Crest bundle, constructs Boulder's bounded handoff record,
-/// exits boot services, and transfers to Boulder's native 64-bit entry.
+/// Arach/Push/Crest bundle, constructs Arach's bounded handoff record,
+/// exits boot services, and transfers to Arach's native 64-bit entry.
 #[entry]
 fn main() -> Status {
     uefi::helpers::init().expect("Granite requires a usable UEFI console");
@@ -70,14 +70,14 @@ fn main() -> Status {
     match preflight_bundle() {
         Ok(bundle) => {
             uefi::println!(
-                "Granite: bounded Boulder/Push/Crest preflight passed ({}/{}/{} bytes)",
-                bundle.boulder.bytes.len(),
+                "Granite: bounded Arach/Push/Crest preflight passed ({}/{}/{} bytes)",
+                bundle.arach.bytes.len(),
                 bundle.push.bytes.len(),
                 bundle.crest.bytes.len(),
             );
             uefi::println!(
-                "Granite: admitted ELF load segments Boulder={} Push={} Crest={}",
-                bundle.boulder.layout.segments().len(),
+                "Granite: admitted ELF load segments Arach={} Push={} Crest={}",
+                bundle.arach.layout.segments().len(),
                 bundle.push.layout.segments().len(),
                 bundle.crest.layout.segments().len(),
             );
@@ -107,8 +107,8 @@ fn main() -> Status {
                 );
             }
             uefi::println!("Granite: placing measured native handoff");
-            match transfer_to_boulder(bundle) {
-                Ok(()) => unreachable!("Boulder handoff must not return"),
+            match transfer_to_arach(bundle) {
+                Ok(()) => unreachable!("Arach handoff must not return"),
                 Err(error) => {
                     uefi::println!("Granite: native handoff rejected: {error:?}");
                     hold_loader_authority()
@@ -128,7 +128,7 @@ fn main() -> Status {
 }
 
 struct BootBundle {
-    boulder: BootArtifact,
+    arach: BootArtifact,
     push: BootArtifact,
     crest: BootArtifact,
     hermes_gsp: Option<T1000GspBootBundle>,
@@ -145,7 +145,7 @@ struct BootArtifact {
 }
 
 /// A non-executable artifact that Granite only transports after independent
-/// measurement.  Boulder performs the stricter NVIDIA role/hash validation;
+/// measurement.  Arach performs the stricter NVIDIA role/hash validation;
 /// Granite never interprets firmware data as executable host code.
 struct RawArtifact {
     bytes: Vec<u8>,
@@ -179,7 +179,7 @@ impl T1000GspBootBundle {
             let start = index * 32;
             material[start..start + 32].copy_from_slice(digest);
         }
-        blacklab::oureboros::sha256(&material)
+        sha256(&material)
     }
 }
 
@@ -187,7 +187,7 @@ impl T1000GspBootBundle {
 enum NativeHandoffError {
     Layout(HandoffError),
     PageCount,
-    BoulderPlacement(usize),
+    ArachPlacement(usize),
     ModulePlacement,
     BootInformationPlacement,
     AcpiRoot,
@@ -231,7 +231,7 @@ impl AcpiRoot {
 
 enum PreflightError {
     BootVolume,
-    Boulder(ArtifactError),
+    Arach(ArtifactError),
     Push(ArtifactError),
     Crest(ArtifactError),
     HermesGspRm(ArtifactError),
@@ -255,7 +255,7 @@ impl PreflightError {
     fn describe(&self) -> (&'static str, &'static str, usize) {
         match self {
             Self::BootVolume => ("boot volume", "unavailable", 0),
-            Self::Boulder(error) => ("Boulder", error.reason(), error.size()),
+            Self::Arach(error) => ("Arach", error.reason(), error.size()),
             Self::Push(error) => ("Push", error.reason(), error.size()),
             Self::Crest(error) => ("Crest", error.reason(), error.size()),
             Self::HermesGspRm(error) => ("Hermes GSP-RM", error.reason(), error.size()),
@@ -301,8 +301,8 @@ fn preflight_bundle() -> Result<BootBundle, PreflightError> {
     let mut volume = filesystem
         .open_volume()
         .map_err(|_| PreflightError::BootVolume)?;
-    let boulder = read_executable(&mut volume, BOULDER_PATH, BOULDER_EXPECTED_SHA256)
-        .map_err(PreflightError::Boulder)?;
+    let arach = read_executable(&mut volume, ARACH_PATH, ARACH_EXPECTED_SHA256)
+        .map_err(PreflightError::Arach)?;
     let push = read_executable(&mut volume, PUSH_PATH, PUSH_EXPECTED_SHA256)
         .map_err(PreflightError::Push)?;
     let crest = read_executable(&mut volume, CREST_PATH, CREST_EXPECTED_SHA256)
@@ -343,9 +343,9 @@ fn preflight_bundle() -> Result<BootBundle, PreflightError> {
     } else {
         None
     };
-    let measurement_root = boot_root(boulder.digest, push.digest, crest.digest);
+    let measurement_root = boot_root(arach.digest, push.digest, crest.digest);
     Ok(BootBundle {
-        boulder,
+        arach,
         push,
         crest,
         hermes_gsp,
@@ -354,7 +354,7 @@ fn preflight_bundle() -> Result<BootBundle, PreflightError> {
 }
 
 fn hermes_gsp_selected() -> bool {
-    env!("SISYPHUS_GRANITE_HERMES_GSP_PRESENT") == "1"
+    env!("ARACH_GRANITE_HERMES_GSP_PRESENT") == "1"
 }
 
 fn read_executable(
@@ -450,10 +450,10 @@ fn read_raw_artifact(
     Ok(RawArtifact { bytes, digest })
 }
 
-fn transfer_to_boulder(bundle: BootBundle) -> Result<(), NativeHandoffError> {
-    handoff::validate_boulder_layout(&bundle.boulder.layout)?;
-    let deferred_bss = deferred_bss_range(&bundle.boulder.layout)?;
-    place_boulder(&bundle.boulder)?;
+fn transfer_to_arach(bundle: BootBundle) -> Result<(), NativeHandoffError> {
+    handoff::validate_arach_layout(&bundle.arach.layout)?;
+    let deferred_bss = deferred_bss_range(&bundle.arach.layout)?;
+    place_arach(&bundle.arach)?;
     let push = place_module(&bundle.push.bytes, deferred_bss)?;
     let crest = place_module(&bundle.crest.bytes, deferred_bss)?;
     let hermes_gsp = match bundle.hermes_gsp.as_ref() {
@@ -506,13 +506,13 @@ fn transfer_to_boulder(bundle: BootBundle) -> Result<(), NativeHandoffError> {
 
     match hermes_gsp.as_ref() {
         Some(gsp) => uefi::println!(
-            "Granite: Boulder placed; Push={:#x} Crest={:#x} GSP-RM={:#x}; leaving UEFI boot services",
+            "Granite: Arach placed; Push={:#x} Crest={:#x} GSP-RM={:#x}; leaving UEFI boot services",
             push.physical_address,
             crest.physical_address,
             gsp.gsp_rm.physical_address,
         ),
         None => uefi::println!(
-            "Granite: Boulder placed; Push={:#x} Crest={:#x}; leaving UEFI boot services",
+            "Granite: Arach placed; Push={:#x} Crest={:#x}; leaving UEFI boot services",
             push.physical_address,
             crest.physical_address,
         ),
@@ -520,7 +520,7 @@ fn transfer_to_boulder(bundle: BootBundle) -> Result<(), NativeHandoffError> {
 
     // After this call neither the firmware allocator nor protocol references
     // may be used. Any invariant failure below halts before an untrusted or
-    // incomplete handoff can reach Boulder.
+    // incomplete handoff can reach Arach.
     let memory_map = unsafe { boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) };
     let mut regions = [FirmwareMemoryRegion::EMPTY; MAXIMUM_MEMORY_REGIONS];
     let region_count = match collect_memory_regions(&memory_map, &mut regions) {
@@ -604,7 +604,7 @@ fn transfer_to_boulder(bundle: BootBundle) -> Result<(), NativeHandoffError> {
         Err(_) => halt_after_boot_services(),
     }
 
-    // The dedicated Boulder entry uses the System V register convention so
+    // The dedicated Arach entry uses the System V register convention so
     // the physical handoff address arrives in RDI. It installs a fresh
     // higher-half map before it reaches any Rust code.
     let entry: unsafe extern "sysv64" fn(usize, usize) -> ! =
@@ -617,14 +617,14 @@ fn transfer_to_boulder(bundle: BootBundle) -> Result<(), NativeHandoffError> {
     }
 }
 
-fn place_boulder(artifact: &BootArtifact) -> Result<(), NativeHandoffError> {
+fn place_arach(artifact: &BootArtifact) -> Result<(), NativeHandoffError> {
     for (index, segment) in artifact.layout.segments().iter().enumerate() {
         let physical_address = segment.physical_address();
         let end = segment
             .physical_end()
-            .ok_or(NativeHandoffError::BoulderPlacement(index))?;
+            .ok_or(NativeHandoffError::ArachPlacement(index))?;
         if physical_address < 0x10_0000 || end > EARLY_MAPPED_PHYSICAL_LIMIT {
-            return Err(NativeHandoffError::BoulderPlacement(index));
+            return Err(NativeHandoffError::ArachPlacement(index));
         }
         if segment.file_bytes() == 0 && segment.virtual_address() >= 0xffff_8000_0000_0000 {
             continue;
@@ -634,21 +634,21 @@ fn place_boulder(artifact: &BootArtifact) -> Result<(), NativeHandoffError> {
             MemoryType::LOADER_DATA,
             page_count(segment.memory_bytes())?,
         )
-        .map_err(|_| NativeHandoffError::BoulderPlacement(index))?;
+        .map_err(|_| NativeHandoffError::ArachPlacement(index))?;
         if target.as_ptr() as u64 != physical_address {
-            return Err(NativeHandoffError::BoulderPlacement(index));
+            return Err(NativeHandoffError::ArachPlacement(index));
         }
         let file_offset = usize::try_from(segment.file_offset())
-            .map_err(|_| NativeHandoffError::BoulderPlacement(index))?;
+            .map_err(|_| NativeHandoffError::ArachPlacement(index))?;
         let file_bytes = usize::try_from(segment.file_bytes())
-            .map_err(|_| NativeHandoffError::BoulderPlacement(index))?;
+            .map_err(|_| NativeHandoffError::ArachPlacement(index))?;
         let source_end = file_offset
             .checked_add(file_bytes)
-            .ok_or(NativeHandoffError::BoulderPlacement(index))?;
+            .ok_or(NativeHandoffError::ArachPlacement(index))?;
         let source = artifact
             .bytes
             .get(file_offset..source_end)
-            .ok_or(NativeHandoffError::BoulderPlacement(index))?;
+            .ok_or(NativeHandoffError::ArachPlacement(index))?;
         let zero_bytes = page_count(segment.memory_bytes())?
             .checked_mul(PAGE_BYTES as usize)
             .ok_or(NativeHandoffError::PageCount)?;
@@ -917,7 +917,7 @@ const fn hex_nibble(value: u8) -> u8 {
 
 /// A loader cannot return after it has accepted or rejected a boot attempt:
 /// returning would make firmware retry the same image and hide the exact
-/// decision. Granite will replace this hold with Boulder's verified transfer.
+/// decision. Granite will replace this hold with Arach's verified transfer.
 fn hold_loader_authority() -> ! {
     loop {
         core::hint::spin_loop();

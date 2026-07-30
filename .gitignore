@@ -1,0 +1,7 @@
+/target/
+/artifacts/
+*.o
+*.a
+*.mod
+*.agdai
+*.ttc

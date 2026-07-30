@@ -1,8 +1,8 @@
-//! Bounded construction of the Multiboot2-shaped handoff consumed by Boulder.
+//! Bounded construction of the Multiboot2-shaped handoff consumed by Arach.
 //!
-//! Granite owns firmware discovery, but Boulder already has a carefully
+//! Granite owns firmware discovery, but Arach already has a carefully
 //! validated Multiboot2 information parser.  This module writes only the
-//! subset of that record Boulder consumes, into loader-owned physical memory,
+//! subset of that record Arach consumes, into loader-owned physical memory,
 //! after every source datum has been bounds checked.
 
 use crate::elf::ExecutableLayout;
@@ -90,8 +90,8 @@ pub struct Framebuffer {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HandoffError {
-    BoulderBootstrapOutsideExecutableSegment,
-    BoulderSegmentOutsideEarlyMap,
+    ArachBootstrapOutsideExecutableSegment,
+    ArachSegmentOutsideEarlyMap,
     TooManyMemoryRegions,
     InvalidMemoryRegion,
     InvalidModule,
@@ -102,10 +102,10 @@ pub enum HandoffError {
 }
 
 /// Ensures the image being placed contains Granite's fixed 64-bit entry and
-/// every loaded Boulder byte remains inside the page tables that entry builds.
-pub fn validate_boulder_layout(layout: &ExecutableLayout) -> Result<(), HandoffError> {
+/// every loaded Arach byte remains inside the page tables that entry builds.
+pub fn validate_arach_layout(layout: &ExecutableLayout) -> Result<(), HandoffError> {
     if !layout.contains_executable_physical_address(GRANITE_BOOTSTRAP_ENTRY_PHYSICAL) {
-        return Err(HandoffError::BoulderBootstrapOutsideExecutableSegment);
+        return Err(HandoffError::ArachBootstrapOutsideExecutableSegment);
     }
     for segment in layout.segments() {
         if segment.physical_address() >= EARLY_MAPPED_PHYSICAL_LIMIT
@@ -113,14 +113,14 @@ pub fn validate_boulder_layout(layout: &ExecutableLayout) -> Result<(), HandoffE
                 .physical_end()
                 .is_none_or(|end| end > EARLY_MAPPED_PHYSICAL_LIMIT)
         {
-            return Err(HandoffError::BoulderSegmentOutsideEarlyMap);
+            return Err(HandoffError::ArachSegmentOutsideEarlyMap);
         }
     }
     Ok(())
 }
 
 /// Writes a complete, aligned Multiboot2 information structure and returns its
-/// exact byte length.  The caller owns the storage for the duration of Boulder
+/// exact byte length.  The caller owns the storage for the duration of Arach
 /// bootstrap.
 pub fn write_multiboot2(
     target: &mut [u8],
