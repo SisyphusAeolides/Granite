@@ -21,7 +21,6 @@ use uefi::proto::media::fs::SimpleFileSystem;
 use uefi::system;
 use uefi::table::cfg::ConfigTableEntry;
 
-#[cfg(target_os = "uefi")]
 #[panic_handler]
 fn granite_panic(info: &core::panic::PanicInfo<'_>) -> ! {
     uefi::println!("Granite panic: {}", info);

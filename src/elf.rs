@@ -280,6 +280,13 @@ fn validate_segment(
     if alignment < 4096 || !alignment.is_power_of_two() {
         return Err(ElfError::SegmentAlignment);
     }
+    // Granite allocates each PT_LOAD at its declared physical address rather
+    // than applying a relocation bias.  Both the physical and virtual bases
+    // therefore have to be page aligned; congruence with p_offset alone is
+    // not sufficient for this fixed-address loader.
+    if segment.physical_address % 4096 != 0 || segment.virtual_address % 4096 != 0 {
+        return Err(ElfError::SegmentAlignment);
+    }
     if segment.file_offset % alignment != segment.virtual_address % alignment
         || segment.file_offset % alignment != segment.physical_address % alignment
     {
@@ -401,6 +408,16 @@ mod tests {
         assert_eq!(
             ExecutableLayout::parse(&bytes),
             Err(ElfError::PhysicalOverlap)
+        );
+    }
+
+    #[test]
+    fn rejects_unaligned_fixed_physical_loads() {
+        let mut bytes = image();
+        put_u64(&mut bytes, PROGRAM_OFFSET + 24, 0x1001);
+        assert_eq!(
+            ExecutableLayout::parse(&bytes),
+            Err(ElfError::SegmentAlignment)
         );
     }
 }
