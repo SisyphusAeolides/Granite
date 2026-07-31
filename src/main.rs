@@ -9,7 +9,7 @@ use granite::handoff::{
     self, BootModule, EARLY_MAPPED_PHYSICAL_LIMIT, FirmwareMemoryRegion, Framebuffer,
     GRANITE_BOOTSTRAP_ENTRY_PHYSICAL, HandoffError, MAXIMUM_MEMORY_REGIONS, MemoryKind, PAGE_BYTES,
 };
-use granite::measurement::{MeasurementError, boot_root, sha256, verify};
+use granite::measurement::{MeasurementError, boot_root, boot_root_with_services, sha256, verify};
 use uefi::CString16;
 use uefi::boot;
 use uefi::boot::{OpenProtocolAttributes, OpenProtocolParams};
@@ -37,6 +37,11 @@ const MAXIMUM_ACPI_ROOT_BYTES: usize = 4096;
 const ARACH_PATH: &str = "\\BOOT\\ARACH";
 const PUSH_PATH: &str = "\\BOOT\\PUSH";
 const CREST_PATH: &str = "\\BOOT\\CREST";
+const COSMIC_DBUS_PATH: &str = "\\BOOT\\DBUS.BIN";
+const COSMIC_COMPOSITOR_PATH: &str = "\\BOOT\\COSCOMP.BIN";
+const COSMIC_GREETER_PATH: &str = "\\BOOT\\COSGREETER.BIN";
+const COSMIC_SESSION_PATH: &str = "\\BOOT\\COSSESSION.BIN";
+const COSMIC_PORTAL_PATH: &str = "\\BOOT\\COSPORTAL.BIN";
 const HERMES_GSP_RM_PATH: &str = "\\BOOT\\GSPRM.BIN";
 const HERMES_SEC2_BOOTLOADER_PATH: &str = "\\BOOT\\SEC2.BIN";
 const HERMES_GSP_BOOTLOADER_PATH: &str = "\\BOOT\\GSPBL.BIN";
@@ -46,6 +51,16 @@ const HERMES_BOOTER_UNLOAD_PATH: &str = "\\BOOT\\BOOTU.BIN";
 const ARACH_EXPECTED_SHA256: [u8; 32] = parse_sha256(env!("ARACH_GRANITE_ARACH_SHA256"));
 const PUSH_EXPECTED_SHA256: [u8; 32] = parse_sha256(env!("ARACH_GRANITE_PUSH_SHA256"));
 const CREST_EXPECTED_SHA256: [u8; 32] = parse_sha256(env!("ARACH_GRANITE_CREST_SHA256"));
+const COSMIC_DBUS_EXPECTED_SHA256: [u8; 32] =
+    parse_sha256(env!("ARACH_GRANITE_COSMIC_DBUS_SHA256"));
+const COSMIC_COMPOSITOR_EXPECTED_SHA256: [u8; 32] =
+    parse_sha256(env!("ARACH_GRANITE_COSMIC_COMPOSITOR_SHA256"));
+const COSMIC_GREETER_EXPECTED_SHA256: [u8; 32] =
+    parse_sha256(env!("ARACH_GRANITE_COSMIC_GREETER_SHA256"));
+const COSMIC_SESSION_EXPECTED_SHA256: [u8; 32] =
+    parse_sha256(env!("ARACH_GRANITE_COSMIC_SESSION_SHA256"));
+const COSMIC_PORTAL_EXPECTED_SHA256: [u8; 32] =
+    parse_sha256(env!("ARACH_GRANITE_COSMIC_PORTAL_SHA256"));
 const HERMES_GSP_RM_EXPECTED_SHA256: [u8; 32] =
     parse_sha256(env!("ARACH_GRANITE_HERMES_GSP_RM_SHA256"));
 const HERMES_SEC2_BOOTLOADER_EXPECTED_SHA256: [u8; 32] =
@@ -130,8 +145,17 @@ struct BootBundle {
     arach: BootArtifact,
     push: BootArtifact,
     crest: BootArtifact,
+    cosmic: Option<CosmicBootBundle>,
     hermes_gsp: Option<T1000GspBootBundle>,
     measurement_root: [u8; 32],
+}
+
+struct CosmicBootBundle {
+    dbus: BootArtifact,
+    compositor: BootArtifact,
+    greeter: BootArtifact,
+    session: BootArtifact,
+    portal: BootArtifact,
 }
 
 struct BootArtifact {
@@ -216,6 +240,14 @@ struct PlacedT1000GspBundle {
     booter_unload: PlacedModule,
 }
 
+struct PlacedCosmicBootBundle {
+    dbus: PlacedModule,
+    compositor: PlacedModule,
+    greeter: PlacedModule,
+    session: PlacedModule,
+    portal: PlacedModule,
+}
+
 #[derive(Clone, Copy)]
 struct AcpiRoot {
     bytes: [u8; MAXIMUM_ACPI_ROOT_BYTES],
@@ -233,6 +265,11 @@ enum PreflightError {
     Arach(ArtifactError),
     Push(ArtifactError),
     Crest(ArtifactError),
+    CosmicDbus(ArtifactError),
+    CosmicCompositor(ArtifactError),
+    CosmicGreeter(ArtifactError),
+    CosmicSession(ArtifactError),
+    CosmicPortal(ArtifactError),
     HermesGspRm(ArtifactError),
     HermesSec2Bootloader(ArtifactError),
     HermesGspBootloader(ArtifactError),
@@ -257,6 +294,11 @@ impl PreflightError {
             Self::Arach(error) => ("Arach", error.reason(), error.size()),
             Self::Push(error) => ("Push", error.reason(), error.size()),
             Self::Crest(error) => ("Crest", error.reason(), error.size()),
+            Self::CosmicDbus(error) => ("COSMIC dbus-broker", error.reason(), error.size()),
+            Self::CosmicCompositor(error) => ("COSMIC compositor", error.reason(), error.size()),
+            Self::CosmicGreeter(error) => ("COSMIC greeter", error.reason(), error.size()),
+            Self::CosmicSession(error) => ("COSMIC session", error.reason(), error.size()),
+            Self::CosmicPortal(error) => ("COSMIC portal", error.reason(), error.size()),
             Self::HermesGspRm(error) => ("Hermes GSP-RM", error.reason(), error.size()),
             Self::HermesSec2Bootloader(error) => {
                 ("Hermes SEC2 bootloader", error.reason(), error.size())
@@ -306,6 +348,38 @@ fn preflight_bundle() -> Result<BootBundle, PreflightError> {
         .map_err(PreflightError::Push)?;
     let crest = read_executable(&mut volume, CREST_PATH, CREST_EXPECTED_SHA256)
         .map_err(PreflightError::Crest)?;
+    let cosmic = if cosmic_selected() {
+        Some(CosmicBootBundle {
+            dbus: read_executable(&mut volume, COSMIC_DBUS_PATH, COSMIC_DBUS_EXPECTED_SHA256)
+                .map_err(PreflightError::CosmicDbus)?,
+            compositor: read_executable(
+                &mut volume,
+                COSMIC_COMPOSITOR_PATH,
+                COSMIC_COMPOSITOR_EXPECTED_SHA256,
+            )
+            .map_err(PreflightError::CosmicCompositor)?,
+            greeter: read_executable(
+                &mut volume,
+                COSMIC_GREETER_PATH,
+                COSMIC_GREETER_EXPECTED_SHA256,
+            )
+            .map_err(PreflightError::CosmicGreeter)?,
+            session: read_executable(
+                &mut volume,
+                COSMIC_SESSION_PATH,
+                COSMIC_SESSION_EXPECTED_SHA256,
+            )
+            .map_err(PreflightError::CosmicSession)?,
+            portal: read_executable(
+                &mut volume,
+                COSMIC_PORTAL_PATH,
+                COSMIC_PORTAL_EXPECTED_SHA256,
+            )
+            .map_err(PreflightError::CosmicPortal)?,
+        })
+    } else {
+        None
+    };
     let hermes_gsp = if hermes_gsp_selected() {
         Some(T1000GspBootBundle {
             gsp_rm: read_raw_artifact(
@@ -342,14 +416,33 @@ fn preflight_bundle() -> Result<BootBundle, PreflightError> {
     } else {
         None
     };
-    let measurement_root = boot_root(arach.digest, push.digest, crest.digest);
+    let measurement_root = match cosmic.as_ref() {
+        Some(cosmic) => boot_root_with_services(
+            arach.digest,
+            push.digest,
+            crest.digest,
+            [
+                cosmic.dbus.digest,
+                cosmic.compositor.digest,
+                cosmic.greeter.digest,
+                cosmic.session.digest,
+                cosmic.portal.digest,
+            ],
+        ),
+        None => boot_root(arach.digest, push.digest, crest.digest),
+    };
     Ok(BootBundle {
         arach,
         push,
         crest,
+        cosmic,
         hermes_gsp,
         measurement_root,
     })
+}
+
+fn cosmic_selected() -> bool {
+    env!("ARACH_GRANITE_COSMIC_PRESENT") == "1"
 }
 
 fn hermes_gsp_selected() -> bool {
@@ -455,6 +548,16 @@ fn transfer_to_arach(bundle: BootBundle) -> Result<(), NativeHandoffError> {
     place_arach(&bundle.arach)?;
     let push = place_module(&bundle.push.bytes, deferred_bss)?;
     let crest = place_module(&bundle.crest.bytes, deferred_bss)?;
+    let cosmic = match bundle.cosmic.as_ref() {
+        Some(cosmic) => Some(PlacedCosmicBootBundle {
+            dbus: place_module(&cosmic.dbus.bytes, deferred_bss)?,
+            compositor: place_module(&cosmic.compositor.bytes, deferred_bss)?,
+            greeter: place_module(&cosmic.greeter.bytes, deferred_bss)?,
+            session: place_module(&cosmic.session.bytes, deferred_bss)?,
+            portal: place_module(&cosmic.portal.bytes, deferred_bss)?,
+        }),
+        None => None,
+    };
     let hermes_gsp = match bundle.hermes_gsp.as_ref() {
         Some(gsp) => Some(PlacedT1000GspBundle {
             gsp_rm: place_module(&gsp.gsp_rm.bytes, deferred_bss)?,
@@ -516,6 +619,16 @@ fn transfer_to_arach(bundle: BootBundle) -> Result<(), NativeHandoffError> {
             crest.physical_address,
         ),
     }
+    if let Some(cosmic) = cosmic.as_ref() {
+        uefi::println!(
+            "Granite: native COSMIC modules placed dbus={:#x} compositor={:#x} greeter={:#x} session={:#x} portal={:#x}",
+            cosmic.dbus.physical_address,
+            cosmic.compositor.physical_address,
+            cosmic.greeter.physical_address,
+            cosmic.session.physical_address,
+            cosmic.portal.physical_address,
+        );
+    }
 
     // After this call neither the firmware allocator nor protocol references
     // may be used. Any invariant failure below halts before an untrusted or
@@ -529,75 +642,82 @@ fn transfer_to_arach(bundle: BootBundle) -> Result<(), NativeHandoffError> {
     let boot_information = unsafe {
         core::slice::from_raw_parts_mut(boot_information.as_ptr(), BOOT_INFORMATION_BYTES)
     };
-    let handoff = match hermes_gsp {
-        Some(gsp) => {
-            let modules = [
-                BootModule {
-                    start: push.physical_address,
-                    bytes: push.bytes,
-                    name: b"push",
-                },
-                BootModule {
-                    start: crest.physical_address,
-                    bytes: crest.bytes,
-                    name: b"crest",
-                },
-                BootModule {
-                    start: gsp.gsp_rm.physical_address,
-                    bytes: gsp.gsp_rm.bytes,
-                    name: b"hermes-gsp",
-                },
-                BootModule {
-                    start: gsp.sec2_bootloader.physical_address,
-                    bytes: gsp.sec2_bootloader.bytes,
-                    name: b"hermes-sec2",
-                },
-                BootModule {
-                    start: gsp.gsp_bootloader.physical_address,
-                    bytes: gsp.gsp_bootloader.bytes,
-                    name: b"hermes-gsp-bootloader",
-                },
-                BootModule {
-                    start: gsp.booter_load.physical_address,
-                    bytes: gsp.booter_load.bytes,
-                    name: b"hermes-booter-load",
-                },
-                BootModule {
-                    start: gsp.booter_unload.physical_address,
-                    bytes: gsp.booter_unload.bytes,
-                    name: b"hermes-booter-unload",
-                },
-            ];
-            handoff::write_multiboot2(
-                boot_information,
-                &regions[..region_count],
-                &modules,
-                framebuffer,
-                acpi_root.as_slice(),
-            )
-        }
-        None => {
-            let modules = [
-                BootModule {
-                    start: push.physical_address,
-                    bytes: push.bytes,
-                    name: b"push",
-                },
-                BootModule {
-                    start: crest.physical_address,
-                    bytes: crest.bytes,
-                    name: b"crest",
-                },
-            ];
-            handoff::write_multiboot2(
-                boot_information,
-                &regions[..region_count],
-                &modules,
-                framebuffer,
-                acpi_root.as_slice(),
-            )
-        }
-    };
+    let mut modules = Vec::with_capacity(12);
+    modules.push(BootModule {
+        start: push.physical_address,
+        bytes: push.bytes,
+        name: b"push",
+    });
+    modules.push(BootModule {
+        start: crest.physical_address,
+        bytes: crest.bytes,
+        name: b"crest",
+    });
+    if let Some(cosmic) = cosmic.as_ref() {
+        modules.extend([
+            BootModule {
+                start: cosmic.dbus.physical_address,
+                bytes: cosmic.dbus.bytes,
+                name: b"dbus-broker",
+            },
+            BootModule {
+                start: cosmic.compositor.physical_address,
+                bytes: cosmic.compositor.bytes,
+                name: b"cosmic-comp",
+            },
+            BootModule {
+                start: cosmic.greeter.physical_address,
+                bytes: cosmic.greeter.bytes,
+                name: b"cosmic-greeter",
+            },
+            BootModule {
+                start: cosmic.session.physical_address,
+                bytes: cosmic.session.bytes,
+                name: b"cosmic-session",
+            },
+            BootModule {
+                start: cosmic.portal.physical_address,
+                bytes: cosmic.portal.bytes,
+                name: b"xdg-desktop-portal-cosmic",
+            },
+        ]);
+    }
+    if let Some(gsp) = hermes_gsp {
+        modules.extend([
+            BootModule {
+                start: gsp.gsp_rm.physical_address,
+                bytes: gsp.gsp_rm.bytes,
+                name: b"hermes-gsp",
+            },
+            BootModule {
+                start: gsp.sec2_bootloader.physical_address,
+                bytes: gsp.sec2_bootloader.bytes,
+                name: b"hermes-sec2",
+            },
+            BootModule {
+                start: gsp.gsp_bootloader.physical_address,
+                bytes: gsp.gsp_bootloader.bytes,
+                name: b"hermes-gsp-bootloader",
+            },
+            BootModule {
+                start: gsp.booter_load.physical_address,
+                bytes: gsp.booter_load.bytes,
+                name: b"hermes-booter-load",
+            },
+            BootModule {
+                start: gsp.booter_unload.physical_address,
+                bytes: gsp.booter_unload.bytes,
+                name: b"hermes-booter-unload",
+            },
+        ]);
+    }
+    let handoff = handoff::write_multiboot2(
+        boot_information,
+        &regions[..region_count],
+        &modules,
+        framebuffer,
+        acpi_root.as_slice(),
+    );
     match handoff {
         Ok(_) => {}
         Err(_) => halt_after_boot_services(),

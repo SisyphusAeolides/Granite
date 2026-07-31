@@ -31,6 +31,7 @@ fn main() {
         panic!("Granite production builds require non-empty ARACH, PUSH, and CREST artifacts");
     }
     emit_optional_t1000_gsp_bundle();
+    emit_optional_cosmic_bundle();
     build_fortran_policy();
 }
 
@@ -111,6 +112,53 @@ fn emit_optional_t1000_gsp_bundle() {
         );
         emit_digest(label, sha256(&bytes));
     }
+}
+
+fn emit_optional_cosmic_bundle() {
+    const ARTIFACTS: [(&str, &str); 5] = [
+        ("COSMIC_DBUS", "dbus-broker"),
+        ("COSMIC_COMPOSITOR", "cosmic-comp"),
+        ("COSMIC_GREETER", "cosmic-greeter"),
+        ("COSMIC_SESSION", "cosmic-session"),
+        ("COSMIC_PORTAL", "xdg-desktop-portal-cosmic"),
+    ];
+
+    println!("cargo:rerun-if-env-changed=ARACH_COSMIC_SERVICES_DIR");
+    let directory = env::var_os("ARACH_COSMIC_SERVICES_DIR").map(PathBuf::from);
+    let cosmic_feature = env::var_os("CARGO_FEATURE_COSMIC_BOOT").is_some();
+    let Some(directory) = directory else {
+        if cosmic_feature {
+            panic!("cosmic-boot requires ARACH_COSMIC_SERVICES_DIR");
+        }
+        println!("cargo:rustc-env=ARACH_GRANITE_COSMIC_PRESENT=0");
+        for (label, _) in ARTIFACTS {
+            emit_digest(label, [0; 32]);
+        }
+        return;
+    };
+    assert!(
+        directory.is_dir(),
+        "ARACH_COSMIC_SERVICES_DIR is not a directory: {}",
+        directory.display()
+    );
+    println!("cargo:rustc-env=ARACH_GRANITE_COSMIC_PRESENT=1");
+    for (label, name) in ARTIFACTS {
+        let path = directory.join(name);
+        println!("cargo:rerun-if-changed={}", path.display());
+        let bytes = fs::read(&path).unwrap_or_else(|error| {
+            panic!(
+                "failed to read native COSMIC service {}: {error}",
+                path.display()
+            )
+        });
+        assert!(
+            !bytes.is_empty() && bytes.len() <= 16 * 1024 * 1024,
+            "native COSMIC service {} must be between 1 byte and 16 MiB",
+            path.display()
+        );
+        emit_digest(label, sha256(&bytes));
+    }
+    println!("cargo:rerun-if-changed={}", directory.display());
 }
 
 fn build_fortran_policy() {

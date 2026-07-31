@@ -47,6 +47,28 @@ pub fn boot_root(
     sha256(&material)
 }
 
+/// Extends the ordered native boot root with the complete COSMIC service
+/// bundle. Keeping this separate preserves the C0 three-artifact root while
+/// making an opted-in desktop handoff unambiguously depend on every service.
+pub fn boot_root_with_services(
+    arach: [u8; SHA256_BYTES],
+    push: [u8; SHA256_BYTES],
+    crest: [u8; SHA256_BYTES],
+    services: [[u8; SHA256_BYTES]; 5],
+) -> [u8; SHA256_BYTES] {
+    let mut material = [0_u8; SHA256_BYTES * 8];
+    material[..SHA256_BYTES].copy_from_slice(&arach);
+    material[SHA256_BYTES..SHA256_BYTES * 2].copy_from_slice(&push);
+    material[SHA256_BYTES * 2..SHA256_BYTES * 3].copy_from_slice(&crest);
+    let mut index = 0;
+    while index < services.len() {
+        let start = SHA256_BYTES * (index + 3);
+        material[start..start + SHA256_BYTES].copy_from_slice(&services[index]);
+        index += 1;
+    }
+    sha256(&material)
+}
+
 /// Performs the complete comparison independently of the first differing
 /// byte, so the firmware-side reject path does not expose a prefix oracle.
 pub fn constant_time_equal(left: [u8; SHA256_BYTES], right: [u8; SHA256_BYTES]) -> bool {
@@ -88,5 +110,25 @@ mod tests {
         let push = sha256(b"push");
         let crest = sha256(b"crest");
         assert_ne!(boot_root(arach, push, crest), boot_root(push, arach, crest));
+    }
+
+    #[test]
+    fn cosmic_root_changes_when_a_service_changes() {
+        let arach = sha256(b"arach");
+        let push = sha256(b"push");
+        let crest = sha256(b"crest");
+        let services = [
+            sha256(b"dbus"),
+            sha256(b"comp"),
+            sha256(b"greeter"),
+            sha256(b"session"),
+            sha256(b"portal"),
+        ];
+        let mut changed = services;
+        changed[2] = sha256(b"different-greeter");
+        assert_ne!(
+            boot_root_with_services(arach, push, crest, services),
+            boot_root_with_services(arach, push, crest, changed)
+        );
     }
 }

@@ -12,6 +12,7 @@ build = "build.rs"
 default = []
 uefi-bin = ["dep:uefi"]
 require-artifacts = []
+cosmic-boot = []
 fortran-policy = []
 
 [dependencies]
