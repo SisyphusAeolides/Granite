@@ -601,6 +601,92 @@ fn transfer_to_arach(bundle: BootBundle) -> Result<(), NativeHandoffError> {
         return Err(NativeHandoffError::BootInformationPlacement);
     }
 
+    // Build the fixed Multiboot module table while UEFI allocation services
+    // are still live.  Nothing after ExitBootServices may grow a Vec: the
+    // firmware-backed allocator is no longer available at that point.
+    let mut modules = [BootModule {
+        start: 0,
+        bytes: 0,
+        name: &[],
+    }; 12];
+    let mut module_count = 0usize;
+    modules[module_count] = BootModule {
+        start: push.physical_address,
+        bytes: push.bytes,
+        name: b"push",
+    };
+    module_count += 1;
+    modules[module_count] = BootModule {
+        start: crest.physical_address,
+        bytes: crest.bytes,
+        name: b"crest",
+    };
+    module_count += 1;
+    if let Some(cosmic) = cosmic.as_ref() {
+        for module in [
+            BootModule {
+                start: cosmic.dbus.physical_address,
+                bytes: cosmic.dbus.bytes,
+                name: b"dbus-broker",
+            },
+            BootModule {
+                start: cosmic.compositor.physical_address,
+                bytes: cosmic.compositor.bytes,
+                name: b"cosmic-comp",
+            },
+            BootModule {
+                start: cosmic.greeter.physical_address,
+                bytes: cosmic.greeter.bytes,
+                name: b"cosmic-greeter",
+            },
+            BootModule {
+                start: cosmic.session.physical_address,
+                bytes: cosmic.session.bytes,
+                name: b"cosmic-session",
+            },
+            BootModule {
+                start: cosmic.portal.physical_address,
+                bytes: cosmic.portal.bytes,
+                name: b"xdg-desktop-portal-cosmic",
+            },
+        ] {
+            modules[module_count] = module;
+            module_count += 1;
+        }
+    }
+    if let Some(gsp) = hermes_gsp.as_ref() {
+        for module in [
+            BootModule {
+                start: gsp.gsp_rm.physical_address,
+                bytes: gsp.gsp_rm.bytes,
+                name: b"hermes-gsp",
+            },
+            BootModule {
+                start: gsp.sec2_bootloader.physical_address,
+                bytes: gsp.sec2_bootloader.bytes,
+                name: b"hermes-sec2",
+            },
+            BootModule {
+                start: gsp.gsp_bootloader.physical_address,
+                bytes: gsp.gsp_bootloader.bytes,
+                name: b"hermes-gsp-bootloader",
+            },
+            BootModule {
+                start: gsp.booter_load.physical_address,
+                bytes: gsp.booter_load.bytes,
+                name: b"hermes-booter-load",
+            },
+            BootModule {
+                start: gsp.booter_unload.physical_address,
+                bytes: gsp.booter_unload.bytes,
+                name: b"hermes-booter-unload",
+            },
+        ] {
+            modules[module_count] = module;
+            module_count += 1;
+        }
+    }
+
     // All FAT-backed artifact vectors are now copied into their retained
     // physical locations, so release their firmware allocations before the
     // final memory map is acquired.
@@ -642,79 +728,10 @@ fn transfer_to_arach(bundle: BootBundle) -> Result<(), NativeHandoffError> {
     let boot_information = unsafe {
         core::slice::from_raw_parts_mut(boot_information.as_ptr(), BOOT_INFORMATION_BYTES)
     };
-    let mut modules = Vec::with_capacity(12);
-    modules.push(BootModule {
-        start: push.physical_address,
-        bytes: push.bytes,
-        name: b"push",
-    });
-    modules.push(BootModule {
-        start: crest.physical_address,
-        bytes: crest.bytes,
-        name: b"crest",
-    });
-    if let Some(cosmic) = cosmic.as_ref() {
-        modules.extend([
-            BootModule {
-                start: cosmic.dbus.physical_address,
-                bytes: cosmic.dbus.bytes,
-                name: b"dbus-broker",
-            },
-            BootModule {
-                start: cosmic.compositor.physical_address,
-                bytes: cosmic.compositor.bytes,
-                name: b"cosmic-comp",
-            },
-            BootModule {
-                start: cosmic.greeter.physical_address,
-                bytes: cosmic.greeter.bytes,
-                name: b"cosmic-greeter",
-            },
-            BootModule {
-                start: cosmic.session.physical_address,
-                bytes: cosmic.session.bytes,
-                name: b"cosmic-session",
-            },
-            BootModule {
-                start: cosmic.portal.physical_address,
-                bytes: cosmic.portal.bytes,
-                name: b"xdg-desktop-portal-cosmic",
-            },
-        ]);
-    }
-    if let Some(gsp) = hermes_gsp {
-        modules.extend([
-            BootModule {
-                start: gsp.gsp_rm.physical_address,
-                bytes: gsp.gsp_rm.bytes,
-                name: b"hermes-gsp",
-            },
-            BootModule {
-                start: gsp.sec2_bootloader.physical_address,
-                bytes: gsp.sec2_bootloader.bytes,
-                name: b"hermes-sec2",
-            },
-            BootModule {
-                start: gsp.gsp_bootloader.physical_address,
-                bytes: gsp.gsp_bootloader.bytes,
-                name: b"hermes-gsp-bootloader",
-            },
-            BootModule {
-                start: gsp.booter_load.physical_address,
-                bytes: gsp.booter_load.bytes,
-                name: b"hermes-booter-load",
-            },
-            BootModule {
-                start: gsp.booter_unload.physical_address,
-                bytes: gsp.booter_unload.bytes,
-                name: b"hermes-booter-unload",
-            },
-        ]);
-    }
     let handoff = handoff::write_multiboot2(
         boot_information,
         &regions[..region_count],
-        &modules,
+        &modules[..module_count],
         framebuffer,
         acpi_root.as_slice(),
     );
