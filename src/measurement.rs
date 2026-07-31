@@ -54,9 +54,9 @@ pub fn boot_root_with_services(
     arach: [u8; SHA256_BYTES],
     push: [u8; SHA256_BYTES],
     crest: [u8; SHA256_BYTES],
-    services: [[u8; SHA256_BYTES]; 5],
+    services: [[u8; SHA256_BYTES]; 8],
 ) -> [u8; SHA256_BYTES] {
-    let mut material = [0_u8; SHA256_BYTES * 8];
+    let mut material = [0_u8; SHA256_BYTES * 11];
     material[..SHA256_BYTES].copy_from_slice(&arach);
     material[SHA256_BYTES..SHA256_BYTES * 2].copy_from_slice(&push);
     material[SHA256_BYTES * 2..SHA256_BYTES * 3].copy_from_slice(&crest);
@@ -118,7 +118,10 @@ mod tests {
         let push = sha256(b"push");
         let crest = sha256(b"crest");
         let services = [
+            sha256(b"seatd"),
             sha256(b"dbus"),
+            sha256(b"pipewire"),
+            sha256(b"wireplumber"),
             sha256(b"comp"),
             sha256(b"greeter"),
             sha256(b"session"),

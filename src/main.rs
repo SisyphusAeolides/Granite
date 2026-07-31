@@ -37,7 +37,10 @@ const MAXIMUM_ACPI_ROOT_BYTES: usize = 4096;
 const ARACH_PATH: &str = "\\BOOT\\ARACH";
 const PUSH_PATH: &str = "\\BOOT\\PUSH";
 const CREST_PATH: &str = "\\BOOT\\CREST";
+const COSMIC_SEATD_PATH: &str = "\\BOOT\\SEATD.BIN";
 const COSMIC_DBUS_PATH: &str = "\\BOOT\\DBUS.BIN";
+const COSMIC_PIPEWIRE_PATH: &str = "\\BOOT\\PIPEWIRE.BIN";
+const COSMIC_WIREPLUMBER_PATH: &str = "\\BOOT\\WIREPLUMBER.BIN";
 const COSMIC_COMPOSITOR_PATH: &str = "\\BOOT\\COSCOMP.BIN";
 const COSMIC_GREETER_PATH: &str = "\\BOOT\\COSGREETER.BIN";
 const COSMIC_SESSION_PATH: &str = "\\BOOT\\COSSESSION.BIN";
@@ -51,8 +54,14 @@ const HERMES_BOOTER_UNLOAD_PATH: &str = "\\BOOT\\BOOTU.BIN";
 const ARACH_EXPECTED_SHA256: [u8; 32] = parse_sha256(env!("ARACH_GRANITE_ARACH_SHA256"));
 const PUSH_EXPECTED_SHA256: [u8; 32] = parse_sha256(env!("ARACH_GRANITE_PUSH_SHA256"));
 const CREST_EXPECTED_SHA256: [u8; 32] = parse_sha256(env!("ARACH_GRANITE_CREST_SHA256"));
+const COSMIC_SEATD_EXPECTED_SHA256: [u8; 32] =
+    parse_sha256(env!("ARACH_GRANITE_COSMIC_SEATD_SHA256"));
 const COSMIC_DBUS_EXPECTED_SHA256: [u8; 32] =
     parse_sha256(env!("ARACH_GRANITE_COSMIC_DBUS_SHA256"));
+const COSMIC_PIPEWIRE_EXPECTED_SHA256: [u8; 32] =
+    parse_sha256(env!("ARACH_GRANITE_COSMIC_PIPEWIRE_SHA256"));
+const COSMIC_WIREPLUMBER_EXPECTED_SHA256: [u8; 32] =
+    parse_sha256(env!("ARACH_GRANITE_COSMIC_WIREPLUMBER_SHA256"));
 const COSMIC_COMPOSITOR_EXPECTED_SHA256: [u8; 32] =
     parse_sha256(env!("ARACH_GRANITE_COSMIC_COMPOSITOR_SHA256"));
 const COSMIC_GREETER_EXPECTED_SHA256: [u8; 32] =
@@ -151,7 +160,10 @@ struct BootBundle {
 }
 
 struct CosmicBootBundle {
+    seatd: BootArtifact,
     dbus: BootArtifact,
+    pipewire: BootArtifact,
+    wireplumber: BootArtifact,
     compositor: BootArtifact,
     greeter: BootArtifact,
     session: BootArtifact,
@@ -241,7 +253,10 @@ struct PlacedT1000GspBundle {
 }
 
 struct PlacedCosmicBootBundle {
+    seatd: PlacedModule,
     dbus: PlacedModule,
+    pipewire: PlacedModule,
+    wireplumber: PlacedModule,
     compositor: PlacedModule,
     greeter: PlacedModule,
     session: PlacedModule,
@@ -265,7 +280,10 @@ enum PreflightError {
     Arach(ArtifactError),
     Push(ArtifactError),
     Crest(ArtifactError),
+    CosmicSeatd(ArtifactError),
     CosmicDbus(ArtifactError),
+    CosmicPipewire(ArtifactError),
+    CosmicWireplumber(ArtifactError),
     CosmicCompositor(ArtifactError),
     CosmicGreeter(ArtifactError),
     CosmicSession(ArtifactError),
@@ -294,7 +312,10 @@ impl PreflightError {
             Self::Arach(error) => ("Arach", error.reason(), error.size()),
             Self::Push(error) => ("Push", error.reason(), error.size()),
             Self::Crest(error) => ("Crest", error.reason(), error.size()),
+            Self::CosmicSeatd(error) => ("COSMIC seatd", error.reason(), error.size()),
             Self::CosmicDbus(error) => ("COSMIC dbus-broker", error.reason(), error.size()),
+            Self::CosmicPipewire(error) => ("COSMIC PipeWire", error.reason(), error.size()),
+            Self::CosmicWireplumber(error) => ("COSMIC WirePlumber", error.reason(), error.size()),
             Self::CosmicCompositor(error) => ("COSMIC compositor", error.reason(), error.size()),
             Self::CosmicGreeter(error) => ("COSMIC greeter", error.reason(), error.size()),
             Self::CosmicSession(error) => ("COSMIC session", error.reason(), error.size()),
@@ -350,8 +371,22 @@ fn preflight_bundle() -> Result<BootBundle, PreflightError> {
         .map_err(PreflightError::Crest)?;
     let cosmic = if cosmic_selected() {
         Some(CosmicBootBundle {
+            seatd: read_executable(&mut volume, COSMIC_SEATD_PATH, COSMIC_SEATD_EXPECTED_SHA256)
+                .map_err(PreflightError::CosmicSeatd)?,
             dbus: read_executable(&mut volume, COSMIC_DBUS_PATH, COSMIC_DBUS_EXPECTED_SHA256)
                 .map_err(PreflightError::CosmicDbus)?,
+            pipewire: read_executable(
+                &mut volume,
+                COSMIC_PIPEWIRE_PATH,
+                COSMIC_PIPEWIRE_EXPECTED_SHA256,
+            )
+            .map_err(PreflightError::CosmicPipewire)?,
+            wireplumber: read_executable(
+                &mut volume,
+                COSMIC_WIREPLUMBER_PATH,
+                COSMIC_WIREPLUMBER_EXPECTED_SHA256,
+            )
+            .map_err(PreflightError::CosmicWireplumber)?,
             compositor: read_executable(
                 &mut volume,
                 COSMIC_COMPOSITOR_PATH,
@@ -422,7 +457,10 @@ fn preflight_bundle() -> Result<BootBundle, PreflightError> {
             push.digest,
             crest.digest,
             [
+                cosmic.seatd.digest,
                 cosmic.dbus.digest,
+                cosmic.pipewire.digest,
+                cosmic.wireplumber.digest,
                 cosmic.compositor.digest,
                 cosmic.greeter.digest,
                 cosmic.session.digest,
@@ -550,7 +588,10 @@ fn transfer_to_arach(bundle: BootBundle) -> Result<(), NativeHandoffError> {
     let crest = place_module(&bundle.crest.bytes, deferred_bss)?;
     let cosmic = match bundle.cosmic.as_ref() {
         Some(cosmic) => Some(PlacedCosmicBootBundle {
+            seatd: place_module(&cosmic.seatd.bytes, deferred_bss)?,
             dbus: place_module(&cosmic.dbus.bytes, deferred_bss)?,
+            pipewire: place_module(&cosmic.pipewire.bytes, deferred_bss)?,
+            wireplumber: place_module(&cosmic.wireplumber.bytes, deferred_bss)?,
             compositor: place_module(&cosmic.compositor.bytes, deferred_bss)?,
             greeter: place_module(&cosmic.greeter.bytes, deferred_bss)?,
             session: place_module(&cosmic.session.bytes, deferred_bss)?,
@@ -608,7 +649,7 @@ fn transfer_to_arach(bundle: BootBundle) -> Result<(), NativeHandoffError> {
         start: 0,
         bytes: 0,
         name: &[],
-    }; 12];
+    }; 16];
     let mut module_count = 0usize;
     modules[module_count] = BootModule {
         start: push.physical_address,
@@ -625,9 +666,24 @@ fn transfer_to_arach(bundle: BootBundle) -> Result<(), NativeHandoffError> {
     if let Some(cosmic) = cosmic.as_ref() {
         for module in [
             BootModule {
+                start: cosmic.seatd.physical_address,
+                bytes: cosmic.seatd.bytes,
+                name: b"seatd",
+            },
+            BootModule {
                 start: cosmic.dbus.physical_address,
                 bytes: cosmic.dbus.bytes,
                 name: b"dbus-broker",
+            },
+            BootModule {
+                start: cosmic.pipewire.physical_address,
+                bytes: cosmic.pipewire.bytes,
+                name: b"pipewire",
+            },
+            BootModule {
+                start: cosmic.wireplumber.physical_address,
+                bytes: cosmic.wireplumber.bytes,
+                name: b"wireplumber",
             },
             BootModule {
                 start: cosmic.compositor.physical_address,
@@ -707,8 +763,11 @@ fn transfer_to_arach(bundle: BootBundle) -> Result<(), NativeHandoffError> {
     }
     if let Some(cosmic) = cosmic.as_ref() {
         uefi::println!(
-            "Granite: native COSMIC modules placed dbus={:#x} compositor={:#x} greeter={:#x} session={:#x} portal={:#x}",
+            "Granite: native COSMIC modules placed seatd={:#x} dbus={:#x} pipewire={:#x} wireplumber={:#x} compositor={:#x} greeter={:#x} session={:#x} portal={:#x}",
+            cosmic.seatd.physical_address,
             cosmic.dbus.physical_address,
+            cosmic.pipewire.physical_address,
+            cosmic.wireplumber.physical_address,
             cosmic.compositor.physical_address,
             cosmic.greeter.physical_address,
             cosmic.session.physical_address,

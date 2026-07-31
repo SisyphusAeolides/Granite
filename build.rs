@@ -115,8 +115,11 @@ fn emit_optional_t1000_gsp_bundle() {
 }
 
 fn emit_optional_cosmic_bundle() {
-    const ARTIFACTS: [(&str, &str); 5] = [
+    const ARTIFACTS: [(&str, &str); 8] = [
+        ("COSMIC_SEATD", "seatd"),
         ("COSMIC_DBUS", "dbus-broker"),
+        ("COSMIC_PIPEWIRE", "pipewire"),
+        ("COSMIC_WIREPLUMBER", "wireplumber"),
         ("COSMIC_COMPOSITOR", "cosmic-comp"),
         ("COSMIC_GREETER", "cosmic-greeter"),
         ("COSMIC_SESSION", "cosmic-session"),
