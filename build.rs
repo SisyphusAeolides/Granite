@@ -13,30 +13,36 @@ fn main() {
         .unwrap_or_else(|| manifest_directory.join("artifacts"));
     println!("cargo:rerun-if-env-changed=ARACH_ARTIFACT_DIR");
 
-    emit_configured_artifact(
+    let arach = emit_configured_artifact(
         "ARACH",
         "ARACH_KERNEL_IMAGE",
         &artifact_directory.join("arach"),
     );
-    emit_configured_artifact("PUSH", "ARACH_PUSH_IMAGE", &artifact_directory.join("push"));
-    emit_configured_artifact(
+    let push =
+        emit_configured_artifact("PUSH", "ARACH_PUSH_IMAGE", &artifact_directory.join("push"));
+    let crest = emit_configured_artifact(
         "CREST",
         "ARACH_CREST_IMAGE",
         &artifact_directory.join("crest"),
     );
+    if env::var_os("CARGO_FEATURE_REQUIRE_ARTIFACTS").is_some()
+        && (arach == [0; 32] || push == [0; 32] || crest == [0; 32])
+    {
+        panic!("Granite production builds require non-empty ARACH, PUSH, and CREST artifacts");
+    }
     emit_optional_t1000_gsp_bundle();
     build_fortran_policy();
 }
 
-fn emit_configured_artifact(label: &str, key: &str, fallback: &Path) {
+fn emit_configured_artifact(label: &str, key: &str, fallback: &Path) -> [u8; 32] {
     println!("cargo:rerun-if-env-changed={key}");
     let path = env::var_os(key)
         .map(PathBuf::from)
         .unwrap_or_else(|| fallback.into());
-    emit_artifact_digest(label, &path);
+    emit_artifact_digest(label, &path)
 }
 
-fn emit_artifact_digest(label: &str, path: &Path) {
+fn emit_artifact_digest(label: &str, path: &Path) -> [u8; 32] {
     println!("cargo:rerun-if-changed={}", path.display());
     let digest = match fs::read(path) {
         Ok(bytes) if !bytes.is_empty() => sha256(&bytes),
@@ -54,6 +60,7 @@ fn emit_artifact_digest(label: &str, path: &Path) {
         }
     };
     emit_digest(label, digest);
+    digest
 }
 
 fn emit_optional_t1000_gsp_bundle() {
