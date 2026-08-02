@@ -26,33 +26,34 @@ done
 first="$scratch/first/x86_64-unknown-uefi/release/granite.efi"
 second="$scratch/second/x86_64-unknown-uefi/release/granite.efi"
 cmp --silent "$first" "$second"
+"$root/scripts/verify-uefi-image.sh" "$first" "$second"
 
-python3 - "$first" "$second" <<'PY'
+timestamped="$scratch/timestamped.efi"
+debug_bearing="$scratch/debug-bearing.efi"
+python3 - "$first" "$timestamped" "$debug_bearing" <<'PY'
 import pathlib
 import struct
 import sys
 
-for argument in sys.argv[1:]:
-    path = pathlib.Path(argument)
-    data = path.read_bytes()
-    if len(data) < 0x100 or data[:2] != b"MZ":
-        raise SystemExit(f"invalid PE image: {path}")
-    pe_offset = struct.unpack_from("<I", data, 0x3C)[0]
-    if pe_offset + 24 > len(data) or data[pe_offset : pe_offset + 4] != b"PE\0\0":
-        raise SystemExit(f"missing PE signature: {path}")
-    timestamp = struct.unpack_from("<I", data, pe_offset + 8)[0]
-    optional = pe_offset + 24
-    if struct.unpack_from("<H", data, optional)[0] != 0x20B:
-        raise SystemExit(f"Granite is not PE32+: {path}")
-    directory_count = struct.unpack_from("<I", data, optional + 108)[0]
-    if directory_count <= 6:
-        raise SystemExit(f"PE debug directory is unavailable: {path}")
-    debug_rva, debug_size = struct.unpack_from(
-        "<II", data, optional + 112 + (6 * 8)
-    )
-    if timestamp != 0 or debug_rva != 0 or debug_size != 0:
-        raise SystemExit(f"nondeterministic PE metadata remains: {path}")
+source = pathlib.Path(sys.argv[1]).read_bytes()
+pe_offset = struct.unpack_from("<I", source, 0x3C)[0]
+
+timestamped = bytearray(source)
+struct.pack_into("<I", timestamped, pe_offset + 8, 1)
+pathlib.Path(sys.argv[2]).write_bytes(timestamped)
+
+debug_bearing = bytearray(source)
+optional = pe_offset + 24
+struct.pack_into("<II", debug_bearing, optional + 112 + (6 * 8), 1, 1)
+pathlib.Path(sys.argv[3]).write_bytes(debug_bearing)
 PY
+
+for invalid in "$timestamped" "$debug_bearing"; do
+    if "$root/scripts/verify-uefi-image.sh" "$invalid" >/dev/null 2>&1; then
+        echo "Granite metadata verifier accepted a mutated image" >&2
+        exit 1
+    fi
+done
 
 sha256sum "$first" "$second"
 printf '%s\n' 'Granite reproducible UEFI gate passed'
