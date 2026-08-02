@@ -12,6 +12,12 @@ loader fails closed. Production builds should enable the `require-artifacts`
 feature; that turns a missing or empty input into a build error instead of
 producing an EFI that cannot boot.
 
+The UEFI target fixes the PE timestamp at zero and suppresses the CodeView
+record whose generated signature otherwise varies between output directories.
+The reproducibility gate performs two independent production builds, requires
+byte-identical images, and parses both PE headers to reject either metadata
+field if it reappears.
+
 Rust implements artifact admission and the UEFI handoff. Fortran exposes
 readiness telemetry that cannot override digest checks. Idris 2 makes complete
 bundle assembly total, and Agda restricts firmware exit to a handoff carrying
@@ -22,6 +28,7 @@ all three verification witnesses.
 ```sh
 cargo fmt --all -- --check
 cargo test --features fortran-policy
+scripts/check-reproducible-uefi.sh
 scripts/check-formal-models.sh
 
 # Production UEFI build (requires all three image variables above)
