@@ -48,3 +48,14 @@ is reported by bounded route and support level; this README does not claim
 universal native support. Gate 3 requires signed hardware identity, target
 kernel provenance, package authority, health checks, rollback behavior, and
 representative physical-hardware evidence before production qualification.
+
+## Current ArachOS integration status
+
+This project is maintained as part of the ArachOS production graph. Its role is
+measured UEFI boot composition and hardware handoff.
+
+CI and release evidence are evaluated on immutable revisions. Hardware support
+is reported by bounded route and support level; this README does not claim
+universal native support. Gate 3 requires signed hardware identity, target
+kernel provenance, package authority, health checks, rollback behavior, and
+representative physical-hardware evidence before production qualification.
