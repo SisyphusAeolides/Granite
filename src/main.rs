@@ -81,7 +81,7 @@ const HERMES_BOOTER_LOAD_EXPECTED_SHA256: [u8; 32] =
 const HERMES_BOOTER_UNLOAD_EXPECTED_SHA256: [u8; 32] =
     parse_sha256(env!("ARACH_GRANITE_HERMES_BOOTER_UNLOAD_SHA256"));
 
-/// Granite is Arach OS's native UEFI boot authority.
+/// Granite is ArachOS's native UEFI boot authority.
 ///
 /// Granite opens the firmware boot volume directly, measures the assembled
 /// Arach/Push/Crest bundle, constructs Arach's bounded handoff record,

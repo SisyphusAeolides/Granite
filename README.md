@@ -1,6 +1,6 @@
 # Granite
 
-Granite is the measured UEFI bootloader for Arach OS. It admits only bounded
+Granite is the measured UEFI bootloader for ArachOS. It admits only bounded
 ELF load plans whose Arach Kernel, Push, and Crest bytes match independently
 supplied SHA-256 manifests, then constructs the exact firmware handoff consumed
 by Arach Kernel.
