@@ -18,10 +18,10 @@ jobs:
           components: rustfmt
           targets: x86_64-unknown-uefi
       - run: cargo fmt --all -- --check
-      - run: cargo test --features fortran-policy
-      - run: cargo check --target x86_64-unknown-uefi --features uefi-bin
+      - run: cargo test --locked --features fortran-policy
+      - run: cargo check --locked --target x86_64-unknown-uefi --features uefi-bin
       - run: scripts/check-reproducible-uefi.sh
-      - run: git diff --check
+      - run: git diff --check && git diff --exit-code
 
   idris-agda:
     runs-on: ubuntu-24.04
